@@ -51,12 +51,13 @@ switch before installation.
 
 ## RS485 Bus Interface
 
-One module bridges the STM32U585's 3.3V UART to the RS485 differential bus.
+The RS485 temp/humidity sensors are read by the Linux side (QRB2210) via a USB-RS485
+adapter — not by the MCU. The MAX3485 module is not used.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **MAX3485 TTL↔RS485 transceiver module, 3.3V** | **Must be the 3.3V MAX3485 variant** — the common 5V MAX485 will damage STM32 GPIO pins. Search: *"MAX3485 3.3V RS485 module Arduino"*. ~$1–3. Includes screw terminals for A/B bus wires. |
-| 1 | **120Ω resistor, 1/4W** | RS485 bus termination — solder across A and B terminals at the far end of the sensor cable |
+| 1 | **USB-to-RS485 adapter** | Plugs into one of the QRB2210's USB ports. Search: *"USB RS485 adapter CH340"* or *"USB RS485 converter"*. ~$3–8. Choose one with screw terminals for A/B wires. The CH340 or FTDI chipset variants both work on Linux. |
+| 1 | **120Ω resistor, 1/4W** | RS485 bus termination — solder across A and B terminals at the far end of the sensor cable (outdoor sensor end) |
 
 ---
 
@@ -117,12 +118,12 @@ Drives all 8 HVAC control outputs.
 
 ## Summary: Communication Buses
 
-| Bus | Protocol | MCU Port | Devices on Bus | Max cable length |
-|-----|----------|----------|----------------|-----------------|
-| RS485 (via MAX3485) | Modbus RTU | Serial2 | 2× SHT30 temp/hum transmitters | 1200m (well within 3m run) |
-| UART direct | Modbus RTU | Serial1 | 2× PZEM-004T power monitors | ~5m practical (UART level) |
-| Digital (opto) | Active-low logic | D2–D10 | 9 thermostat/humidity inputs | Determined by opto board |
-| Digital (relay) | Active-low logic | D11–D18 | 8 HVAC control outputs | Relay contacts to load |
+| Bus | Protocol | Connected to | Devices on Bus | Max cable length |
+|-----|----------|--------------|----------------|-----------------|
+| RS485 (via USB-RS485 adapter) | Modbus RTU | QRB2210 USB port | 2× SHT30 temp/hum transmitters | 1200m (well within 4m run) |
+| UART direct | Modbus RTU | MCU Serial1 (D0/D1) | 2× PZEM-004T power monitors | ~5m practical (UART level) |
+| Digital (opto) | Active-low logic | MCU D2–D10 | 9 thermostat/humidity inputs | Determined by opto board |
+| Digital (relay) | Active-low logic | MCU D11–D18 | 8 HVAC control outputs | Relay contacts to load |
 
 ---
 
