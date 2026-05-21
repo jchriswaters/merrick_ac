@@ -12,12 +12,12 @@ The system is split across the two processors on the Uno Q board:
 │  │   STM32U585 MCU          │    │  QRB2210 Linux (Debian) │   │
 │  │   (Zephyr / Arduino)     │◄──►│                         │   │
 │  │                          │    │  • paho-mqtt client      │   │
-│  │  • Read 9 digital inputs │    │  • Flask web config API  │   │
-│  │  • Drive 8 relay outputs │    │  • JSON config store     │   │
-│  │  • Poll RS485 Modbus bus │    │  • MQTT broker publish   │   │
-│  │  • Poll PZEM UART bus    │    │                         │   │
-│  │  • Zone + humidity logic │    │  WiFi 5 dual-band        │   │
-│  │  • Expose state via RPC  │    │  (WCBN3536A onboard)    │   │
+│  │  • Read 9 digital inputs │    │  • paho-mqtt client      │   │
+│  │  • Drive 8 relay outputs │    │  • Flask web config API  │   │
+│  │  • Poll PZEM UART bus    │    │  • JSON config store     │   │
+│  │  • Zone + humidity logic │    │  • Poll RS485 sensors    │   │
+│  │  • Expose state via RPC  │    │    (USB-RS485 adapter)   │   │
+│  │                          │    │  WiFi 5 dual-band        │   │
 │  └──────────────────────────┘    └─────────────────────────┘   │
 │              ▲                          Arduino Bridge RPC       │
 └──────────────┼──────────────────────────────────────────────────┘
@@ -26,7 +26,6 @@ The system is split across the two processors on the Uno Q board:
      │  Physical I/O      │
      │  9 inputs (24VAC)  │
      │  8 relay outputs   │
-     │  RS485 bus         │
      │  UART (PZEM)       │
      └────────────────────┘
 ```
@@ -108,15 +107,19 @@ This is required because the STM32U585 is a 3.3V device.
 
 ### 4a. RS485 Modbus RTU Bus — Temperature + Humidity
 
-**Hardware:** One **MAX3485 module** (3.3V version — mandatory, not the 5V MAX485)
-bridges the STM32 UART to the RS485 differential bus. The 3.3V version is required
-because the STM32U585 GPIO is 3.3V only.
+**Read by the Linux side (QRB2210), not the MCU.**
+
+The Arduino Uno Q form factor only exposes one accessible hardware UART (Serial1 on
+D0/D1). Rather than use SoftwareSerial (unreliable for Modbus RTU), the RS485
+temp/humidity sensors are read directly by the Linux side via a **USB-to-RS485 adapter**
+plugged into the QRB2210's USB port. The `bridge_daemon.py` polls both sensors and
+includes readings in the MQTT payload. The MCU is not involved.
+
+The MAX3485 module, Serial2, and D20 direction-control pin are **not used** — D20/SDA
+and Serial2 pins are free for future use.
 
 ```
-STM32 Serial2 TX ──► MAX3485 DI
-STM32 Serial2 RX ◄── MAX3485 RO
-STM32 D20 (GPIO) ──► MAX3485 DE+RE (direction control, tied together)
-MAX3485 A/B ──► shielded twisted-pair ──► sensor chain
+QRB2210 USB port ──► USB-RS485 adapter ──► shielded twisted-pair ──► sensor chain
 ```
 
 Terminate the far end of the RS485 cable with a **120Ω resistor** across A and B.
@@ -262,11 +265,11 @@ Topics:
 |---------|-----------|-----------------------------|----------------|
 | D2–D10  | Input     | Thermostat + humidity signals | Digital (via opto) |
 | D11–D18 | Output    | Relay control               | Digital        |
-| D19     | I/O       | (spare — was 1-Wire, not used) | —            |
-| D20     | Output    | RS485 direction control     | GPIO           |
-| Serial2 | UART      | RS485 Modbus (temp/hum)     | Modbus RTU     |
+| D19     | I/O       | (spare)                     | —              |
+| D20/SDA | I/O       | (spare — RS485 DE pin not needed; sensors read by Linux side) | — |
 | Serial1 | UART      | PZEM-004T Modbus            | Modbus RTU     |
-| SDA/SCL | I2C       | (spare — available)         | I2C            |
+| Serial2 | UART      | (spare — not accessible on Uno Q shield headers) | — |
+| SCL     | I/O       | (spare — available)         | —              |
 | A0–A5   | Analog    | All spare                   | ADC            |
 
 ---
@@ -278,8 +281,8 @@ Topics:
   prevents relay chatter on boot
 - The PZEM library (`PZEM004Tv30`) requires a **hardware UART** — SoftwareSerial
   will not work reliably with two devices
-- The RS485 MAX3485 direction pin (DE+RE tied together) must be driven HIGH before
-  transmitting and LOW immediately after — handle this in the Modbus request wrapper
+- RS485 temp/humidity sensors are read by `bridge_daemon.py` on the Linux side via a
+  USB-RS485 adapter — the MCU sketch does not include any RS485 or SHT30 code
 - Prefer `INPUT_PULLDOWN` (not INPUT_PULLUP) for thermostat inputs if active-HIGH
   opto outputs are used; verify against your specific opto board's output logic
 - `analogReadResolution(12)` should be called in setup() to enable 12-bit ADC on STM32
