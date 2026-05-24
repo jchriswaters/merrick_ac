@@ -54,48 +54,54 @@ read directly by the Linux side. No wiring back to the Arduino MCU required.
 
 ## RS485 Bus Interface
 
-The RS485 temp/humidity sensors are read by the Linux side (QRB2210) via a USB-RS485
-adapter — not by the MCU. The MAX3485 module is not used.
+All sensors and power monitors are read by the Linux side (QRB2210) via a USB-RS485
+adapter plugged into the QRB2210 USB port. The FT232RL chip in the Waveshare adapter
+is supported by the Linux kernel's built-in `ftdi_sio` driver — no manual driver
+installation needed. The device appears as `/dev/ttyUSB0` when plugged in.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **USB-to-RS485 adapter** | Plugs into one of the QRB2210's USB ports. Search: *"USB RS485 adapter CH340"* or *"USB RS485 converter"*. ~$3–8. Choose one with screw terminals for A/B wires. The CH340 or FTDI chipset variants both work on Linux. |
-| 1 | **120Ω resistor, 1/4W** | RS485 bus termination — solder across A and B terminals at the far end of the sensor cable (outdoor sensor end) |
+| 1 | **Waveshare USB to RS485/422 Industrial Grade Isolated Converter** (FT232RL + SP485EEN) | DIN-rail mountable. Galvanic isolation protects the Linux side from HVAC bus noise. FT232RL is natively supported on Debian Linux — plug-and-play as `/dev/ttyUSB0`. Screw terminals for A/B/GND. Search: *"Waveshare USB to RS485 isolated FT232RL"*. ~$15–20. |
+| 1 | **120Ω resistor, 1/4W** | RS485 bus termination — solder across A and B terminals at the outdoor sensor (far end of the bus) |
 
 ---
 
 ## Input Signal Conditioning
 
-Converts 24 VAC thermostat signals to 3.3V DC logic for the MCU.
+24VAC thermostat signals directly energize relay coils. The relay contacts connect
+the Arduino 3.3V pin to MCU input pins — providing galvanic isolation from 24VAC
+and safe 3.3V logic levels. No AC-DC conversion module required.
+
+**Important:** The contact side of the input relays must use the Arduino **3.3V pin**,
+not 5V. The STM32U585 input pins are 3.3V maximum — feeding 5V will damage the MCU.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **8-channel PC817 optocoupler isolation board** | Handles 8 of the 9 inputs (D2–D9). ~$3–5. Verify the board's output side can be powered at 3.3V, or use the input pulldown approach described in system-design.md. |
-| 1 | **Single-channel PC817 optocoupler module** | 9th input (D10, vent_open_in). Alternatively buy a second 8-channel board for spares. |
-| 1 | **24VAC→5VDC power module** (e.g. HLK-5M05 or equivalent small AC-DC) | Powers the input (LED) side of the opto boards from the existing HVAC 24VAC control transformer. Verify your HVAC transformer has enough spare VA capacity (~0.5W needed). |
+| 9 | **DIN-rail relay module, 24VAC coil, SPDT** | One per thermostat/humidity input (D2–D10). Coil driven directly by 24VAC thermostat signal (between call wire and C/common). Contact side: one terminal to Arduino 3.3V pin, other terminal to MCU input pin. ~$4–10 each. Search: *"DIN rail relay module 24VAC coil"*. Finder 34.51, Phoenix Contact PLC-RSC- 24AC/21, or equivalent. |
 
 ---
 
 ## Output Relay Board
 
-Drives all 8 HVAC control outputs.
+Drives all 8 HVAC control outputs. MCU pins drive the relay coils via optocouplers;
+relay contacts switch 24VAC to the HVAC equipment.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **8-channel 5V relay module, optocoupler-isolated** | Must have a **VCC/VDD jumper** separating relay coil power from logic input power. Wire: logic input VCC → 3.3V rail; relay coil VCC → 5V rail. Relay contacts rated for at least 10A/250VAC. ~$5–8. |
+| 1 | **8-channel 5V relay module, optocoupler-isolated** | Must have a **VCC/VDD jumper** separating relay coil power from logic input power. Wire: logic input VCC → Arduino **3.3V pin**; relay coil VCC → Arduino **5V pin**. Relay contacts rated for at least 10A/250VAC. ~$5–8. The Arduino 5V pin (supplied from the onboard regulator when powered via VIN) provides 5V coil power without a separate supply. |
 
 ---
 
 ## Power Supplies
 
-A single 12V DIN-rail PSU powers everything in the enclosure. A small buck converter
-derives the 5V needed for relay coils and PZEM logic. The HVAC 24VAC transformer
-powers the optocoupler input side separately.
+A single 12V DIN-rail PSU is the only external DC supply needed. The Arduino's
+onboard regulator provides 5V (relay coils) and 3.3V (logic + input relay contacts)
+from the 12V VIN input. The 24VAC input relay coils are powered directly from the
+existing HVAC thermostat wiring — no AC-DC conversion module required.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **12VDC DIN-rail PSU, 2A** | Main supply for the whole enclosure. Powers: Uno Q VIN pin, RS485 temp/humidity sensors, and buck converter input. Search: *"Mean Well HDR-30-12"* or *"Mean Well DR-30-12"* (~$15–20). DIN-rail mount keeps wiring clean. 2A provides comfortable headroom for the Uno Q running Linux (~1A peak) plus sensors. |
-| 1 | **12V→5V DC-DC buck converter module** | Derives 5V from the 12V main supply. Powers: relay board coil VCC. Search: *"LM2596 buck converter module"* or *"MP1584 buck converter"* (~$2–4). Set output to 5.0V with a multimeter before connecting. |
+| 1 | **12VDC DIN-rail PSU, 2A** | Powers: Uno Q VIN pin and RS485 temp/humidity sensors. The Arduino's onboard regulator derives 5V (for output relay coils) and 3.3V (for logic and input relay contacts) from this 12V input. Search: *"Mean Well HDR-30-12"* or *"Mean Well DR-30-12"* (~$15–20). **Note:** Monitor for instability if many output relays are active simultaneously — the 5V rail is shared with the Linux processor. If brownouts occur, add a separate 5V supply for the relay board coil VCC. |
 
 ---
 
@@ -103,9 +109,9 @@ powers the optocoupler input side separately.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **DIN rail enclosure / panel enclosure** | Mounts all boards cleanly. At minimum 200×200×80mm to fit the Uno Q, relay board, opto boards, and DIN-mounted power supplies. Keep mains-voltage wiring (relay contacts, PZEM terminals) physically separated from low-voltage logic wiring. |
+| 1 | **DIN rail enclosure / panel enclosure** | At minimum **300×250×100mm** to fit: Uno Q + shield, 8-channel output relay board, 9× DIN-rail input relay modules, 2× SDM120 meters, 12V PSU, Waveshare RS485 adapter, and terminal blocks. Keep mains-voltage wiring (relay contacts, SDM120 L/N terminals) physically separated from low-voltage logic wiring. |
 | 1 roll | **Shielded cable, 4-conductor, 22 AWG** | RS485 sensor bus wiring. Carries both RS485 signal (A/B on a twisted pair) and 12V sensor power (VCC/GND on the remaining two conductors) in a single run. Daisy-chain from USB-RS485 adapter → indoor sensor → outdoor sensor. Shield drain wire connected to GND at the adapter end only. Search: *"4 conductor shielded cable 22 AWG"* or *"Belden 9504"*. |
-| 1 roll | **3-conductor control wire, 22 AWG** | Thermostat signal runs to opto-isolator inputs |
+| 1 roll | **Multi-conductor control wire, 22 AWG** | Thermostat signal runs (R, C, Y, W per thermostat) to input relay coils in enclosure. 4-conductor minimum per thermostat run. |
 | 1 roll | **2-conductor stranded wire, 18 AWG** | 24VAC and DC power distribution inside enclosure |
 | 4 | **Cable glands** (PG7 or M16) | Weatherproof cable entry into enclosure |
 | 1 bag | **Ferrule crimp terminals** (0.5mm², 22 AWG) | For clean, reliable connections to screw terminal blocks |
@@ -128,7 +134,7 @@ powers the optocoupler input side separately.
 | Bus | Protocol | Connected to | Devices on Bus | Max cable length |
 |-----|----------|--------------|----------------|-----------------|
 | RS485 (via USB-RS485 adapter) | Modbus RTU | QRB2210 USB port | 2× SDM120 power monitors + 2× SHT30 temp/hum | 1200m (well within 4m run) |
-| Digital (opto) | Active-low logic | MCU D2–D10 | 9 thermostat/humidity inputs | Determined by opto board |
+| 24VAC relay contacts | Active-high (3.3V) | MCU D2–D10 | 9 thermostat/humidity inputs | Relay contact to MCU pin |
 | Digital (relay) | Active-low logic | MCU D11–D18 | 8 HVAC control outputs | Relay contacts to load |
 
 ---
@@ -138,5 +144,6 @@ powers the optocoupler input side separately.
 - **Arduino Uno Q:** [store-usa.arduino.cc](https://store-usa.arduino.cc) or authorized distributors (Mouser, Digi-Key, Arrow)
 - **Eastron SDM120-Modbus:** Amazon (search "Eastron SDM120 Modbus"), AliExpress, or automation suppliers (e.g. Allied Electronics, AutomationDirect)
 - **RS485 SHT30 transmitters:** Amazon, AliExpress (search "RS485 Modbus SHT30 temperature humidity transmitter"), DFRobot (product-2279)
-- **MAX3485 module:** Amazon (search "MAX3485 3.3V RS485 module"), AliExpress
-- **Opto boards, relay boards, power modules:** Amazon, AliExpress, Digi-Key
+- **Waveshare USB to RS485 adapter:** Amazon (search "Waveshare USB RS485 isolated FT232RL"), Waveshare official store
+- **DIN-rail relay modules (24VAC coil):** Digi-Key, Mouser, AutomationDirect (search "Finder 34.51 24VAC" or "Phoenix Contact PLC-RSC-24AC")
+- **Output relay board, power modules:** Amazon, AliExpress, Digi-Key

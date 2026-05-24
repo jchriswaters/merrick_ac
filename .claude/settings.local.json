@@ -11,7 +11,8 @@
       "WebFetch(domain:forum.arduino.cc)",
       "WebFetch(domain:www.electronics-lab.com)",
       "Bash(cat)",
-      "Bash(python3 /tmp/update_sysdesign.py)"
+      "Bash(python3 /tmp/update_sysdesign.py)",
+      "Bash(python3 /tmp/update_sysdesign2.py)"
     ]
   }
 }

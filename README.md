@@ -44,12 +44,11 @@ hvac-controller/
 ## Key Constraints
 
 - STM32U585 GPIO and analog pins are **3.3V only** — never exceed 3.3V on any pin
-- All 24 VAC thermostat input signals must pass through **optocoupler isolation** before
-  reaching MCU pins
+- All 24 VAC thermostat input signals are isolated via **24VAC relay coils** — contact
+  side uses **3.3V only** (never 5V) connected to MCU input pins
 - Heat and cool outputs are **hardware-interlocked** — never active simultaneously
 - Compressor protection: **3-minute minimum delay** between mode changes
 - For permanent installation, power the Uno Q via the **VIN pin (7–24V DC)** from a
-  DIN-rail 12V supply wired to the VIN and GND screw terminals on the shield — more
-  robust than USB-C for an enclosure. 12V is recommended (efficient buck conversion
-  to 5V, cooler regulator). USB-C accepts standard 5V 3A (no Power Delivery required)
-  and is suitable for bench/development use. No barrel jack on the Uno Q.
+  DIN-rail 12V supply. The onboard regulator provides 5V (output relay coils) and 3.3V
+  (logic + input relay contacts) — no external buck converter needed. USB-C (5V 3A,
+  no PD required) is suitable for bench use only. No barrel jack on the Uno Q.

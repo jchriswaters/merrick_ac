@@ -59,15 +59,21 @@ pulled up to 3.3V; when the thermostat closes, the pin reads LOW (active-low log
 
 **Input signal conditioning circuit (per channel):**
 ```
-24VAC signal ──► PC817 opto LED (with 1kΩ current-limiting resistor in series)
-PC817 collector ──► MCU pin (INPUT_PULLUP, reads LOW when thermostat calls)
-PC817 emitter ──► GND
-```
-Use an **8-channel PC817 optocoupler board** for inputs D2–D9, and a single-channel
-board or the 8th spare channel for D10.
+24VAC thermostat call (e.g. Y1, W) ──► Relay coil terminal A
+24VAC common (C wire)               ──► Relay coil terminal B
+  → When thermostat calls, relay energizes
 
-Power the opto **input side** from a small **24VAC→5VDC module** tapped off the
-existing HVAC 24VAC transformer (the same transformer that powers the thermostats).
+Relay contact terminal 1 ──► Arduino 3.3V pin
+Relay contact terminal 2 ──► MCU input pin (reads HIGH = 3.3V when relay closed)
+MCU pin configured as INPUT_PULLDOWN
+```
+Use **9× DIN-rail relay modules with 24VAC coils** — one per input channel.
+The relay coils are driven directly by the 24VAC thermostat signals. No AC-DC
+conversion module is required. The contact side uses Arduino 3.3V (not 5V) —
+the STM32U585 input pins are 3.3V maximum.
+
+**Input logic is active-HIGH:** pin reads HIGH (3.3V) when the thermostat is calling,
+LOW when not calling. This is the opposite of the original optocoupler design.
 
 ---
 
@@ -89,8 +95,9 @@ The relay contacts switch 24 VAC control circuits for the HVAC equipment.
 | D18     | dehumidifier_on       | Dehumidifier relay            |                                |
 
 **Relay board wiring note:** Use a board with a VCC/VDD jumper that separates relay
-coil power from the logic input. Connect logic input to 3.3V; relay coil power to 5V.
-This is required because the STM32U585 is a 3.3V device.
+coil power from the logic input. Connect logic input VCC to the Arduino **3.3V pin**;
+relay coil VCC to the Arduino **5V pin** (available from the onboard regulator when
+powered via VIN). No external 5V supply is required.
 
 **CRITICAL SAFETY INTERLOCKS (enforced in firmware):**
 - `high_cool`, `low_cool`, and `high_heat` are **mutually exclusive** with heat outputs.
@@ -104,42 +111,36 @@ This is required because the STM32U585 is a 3.3V device.
 
 ## 3.5. Power Distribution
 
-A single 12V DIN-rail PSU is the only AC-DC converter needed for the enclosure.
-A buck converter derives 5V for relay coil power.
+A single 12V DIN-rail PSU is the only external DC supply needed. The Arduino's
+onboard regulator provides 5V and 3.3V from the 12V VIN input. No buck converter
+or AC-DC conversion module is required.
 
 ```
 AC mains ──► 12V DIN-rail PSU (2A)
                 │
                 ├──► Uno Q VIN pin (via shield screw terminal)
-                │      GND ──► Uno Q GND pin (via shield screw terminal)
+                │      GND ──► Uno Q GND pin
                 │
-                ├──► RS485 sensor VCC (via 4-conductor cable to sensor chain)
-                │      GND ──► RS485 sensor GND
-                │
-                └──► Buck converter IN (12V)
-                           │
-                           └──► Buck converter OUT (5V)
-                                    └──► Relay board VCC (coil power)
+                └──► RS485 sensor VCC (via 4-conductor cable to sensor chain)
+                       GND ──► RS485 sensor GND
 
-HVAC 24VAC transformer ──► 24VAC→5VDC module ──► Opto board input (LED) side VCC
+Uno Q 5V pin  ──► Output relay board coil VCC   (5V relay coils)
+Uno Q 3.3V pin ──► Output relay board logic VCC  (3.3V MCU logic)
+               ──► Input relay contacts (one terminal per relay → MCU input pin)
 
-Note: RS485 energy meters (SDM120) are powered from the AC mains circuits they
-monitor — they draw no power from the 12V DC supply.
+HVAC 24VAC thermostat signals ──► Input relay coils (directly — no conversion needed)
+SDM120 energy meters ──► powered from AC mains circuits they monitor
 ```
 
-**Uno Q 3.3V pin** (from onboard regulator, via shield screw terminal):
-- → Relay board logic input VCC (keeps relay logic at 3.3V, matching STM32U585 GPIO)
-
 **Key points:**
-- The VIN pin accepts 7–24V DC. 12V from the DIN-rail supply is the recommended choice
-  — efficient for buck conversion to 5V and runs the onboard regulator cooler than 24V.
+- The VIN pin accepts 7–24V DC. 12V is recommended — keeps the onboard regulator cool.
 - Do **not** connect both VIN and USB-C simultaneously as primary power sources.
-  USB-C can remain connected for serial monitoring during commissioning — the Uno Q
-  will accept power from whichever source is higher, but avoid this in normal operation.
-- Set the buck converter output to exactly 5.0V with a multimeter *before* connecting
-  the relay board.
-- The 24VAC opto supply is galvanically isolated from the DC logic supply — this is
-  intentional and required for safe 24VAC input signal conditioning.
+  USB-C can remain connected for serial monitoring during commissioning.
+- The 5V pin is shared between the Linux processor and the output relay coils. If
+  instability occurs when multiple relays are active, add a dedicated external 5V
+  supply for the relay board coil VCC.
+- Input relay contacts are galvanically isolated from 24VAC — 3.3V on the contact
+  side is the only voltage that reaches the MCU input pins.
 
 ---
 
@@ -155,7 +156,7 @@ via a USB-RS485 adapter. The `bridge_daemon.py` polls all devices and assembles 
 full MQTT payload. The MCU only handles digital I/O (thermostat inputs and relay outputs).
 
 ```
-QRB2210 USB port ──► USB-RS485 adapter ──► RS485 bus (daisy-chain)
+QRB2210 USB port ──► Waveshare USB-RS485 adapter (/dev/ttyUSB0) ──► RS485 bus (daisy-chain)
                                                 │
                                                 ├── SDM120 #1, addr 0x03 (AC system)
                                                 ├── SDM120 #2, addr 0x04 (dehumidifier)
@@ -308,6 +309,6 @@ Topics:
 - All sensors and power monitors are read by `bridge_daemon.py` on the Linux side
   via the USB-RS485 adapter — the MCU sketch contains **no sensor code at all**
 - D0/D1 (Serial1) are unused and available as spare pins
-- Prefer `INPUT_PULLDOWN` (not INPUT_PULLUP) for thermostat inputs if active-HIGH
-  opto outputs are used; verify against your specific opto board's output logic
+- Thermostat inputs use **active-HIGH logic** (relay contact closes → pin reads HIGH).
+  Configure all input pins as `INPUT_PULLDOWN` so they read LOW when the relay is open
 - `analogReadResolution(12)` should be called in setup() to enable 12-bit ADC on STM32
