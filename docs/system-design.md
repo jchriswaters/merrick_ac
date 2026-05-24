@@ -162,7 +162,10 @@ QRB2210 USB port ──► USB-RS485 adapter ──► shielded twisted-pair ─
 ```
 
 Terminate the far end of the RS485 cable with a **120Ω resistor** across A and B.
-Use **shielded twisted-pair** (e.g. Belden 9841 or equivalent) for the cable run.
+Use **4-conductor shielded 22 AWG cable** (e.g. Belden 9504 or equivalent) — two
+conductors carry RS485 A/B (use the twisted pair if available), the other two carry
+12V and GND for sensor power. RS485 signal lines carry no power themselves.
+Shield drain wire connected to GND at the adapter end only.
 
 **Sensors on this bus:**
 

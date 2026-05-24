@@ -101,7 +101,7 @@ powers the optocoupler input side separately.
 | Qty | Component | Notes |
 |-----|-----------|-------|
 | 1 | **DIN rail enclosure / panel enclosure** | Mounts all boards cleanly. At minimum 200×200×80mm to fit the Uno Q, relay board, opto boards, and DIN-mounted power supplies. Keep mains-voltage wiring (relay contacts, PZEM terminals) physically separated from low-voltage logic wiring. |
-| 1 roll | **Shielded twisted-pair cable, 2-conductor, 22 AWG** (e.g. Belden 9841 or equivalent) | RS485 bus wiring. Daisy-chain from controller → indoor sensor → outdoor sensor. Shield drain wire connected to ground at controller end only. |
+| 1 roll | **Shielded cable, 4-conductor, 22 AWG** | RS485 sensor bus wiring. Carries both RS485 signal (A/B on a twisted pair) and 12V sensor power (VCC/GND on the remaining two conductors) in a single run. Daisy-chain from USB-RS485 adapter → indoor sensor → outdoor sensor. Shield drain wire connected to GND at the adapter end only. Search: *"4 conductor shielded cable 22 AWG"* or *"Belden 9504"*. |
 | 1 roll | **3-conductor control wire, 22 AWG** | Thermostat signal runs to opto-isolator inputs |
 | 1 roll | **2-conductor stranded wire, 18 AWG** | 24VAC and DC power distribution inside enclosure |
 | 4 | **Cable glands** (PG7 or M16) | Weatherproof cable entry into enclosure |
