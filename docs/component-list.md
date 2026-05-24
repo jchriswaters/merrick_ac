@@ -38,13 +38,16 @@ switch before installation.
 
 ## Power Monitoring
 
+RS485 Modbus RTU energy meters — share the same RS485 bus as the temp/humidity sensors,
+read directly by the Linux side. No wiring back to the Arduino MCU required.
+
 | Qty | Component | Specifications | Notes |
 |-----|-----------|---------------|-------|
-| 2 | **PZEM-004T V3.0** (with split-core / open CT clamp) | Measures: voltage (V), current (A), power (W), energy (kWh), frequency (Hz), power factor. UART Modbus RTU. 80–260VAC input. Split-core CT clamp (non-invasive — no wire cutting). ~$8–12 each. | Get the **V3.0** version and the **open CT / split-core clamp** variant. The closed-core version requires disconnecting wires. Verify the board has optocouplers on the UART lines; if not, add external isolation. One-time address assignment required (0x01 for AC system, 0x02 for dehumidifier) — see docs. |
+| 2 | **Eastron SDM120-Modbus** (with split-core CT clamp) | Measures: voltage (V), current (A), active power (W), apparent power (VA), power factor, frequency (Hz), import energy (kWh). RS485 Modbus RTU. 80–270VAC input (works for 120V US circuits). DIN-rail mount (1 module wide). ~$25–35 each. | Get the **CT clamp variant** (SDM120CT) for non-invasive installation — no wire cutting needed. Ships with default Modbus address 0x01 — reprogram to **0x03** (AC system) and **0x04** (dehumidifier) via front panel before installation. Available from Amazon, AliExpress, automation suppliers. |
 
 **CT clamp placement:**
-- PZEM #1 (addr 0x01): CT clamp around the **live wire** feeding the AC compressor/air-handler circuit
-- PZEM #2 (addr 0x02): CT clamp around the **live wire** feeding the dehumidifier
+- SDM120 #1 (addr 0x03): CT clamp around the **live wire** feeding the AC compressor/air-handler circuit
+- SDM120 #2 (addr 0x04): CT clamp around the **live wire** feeding the dehumidifier
 - Clamp around **live wire only** — never around both live and neutral together
 
 ---
@@ -92,7 +95,7 @@ powers the optocoupler input side separately.
 | Qty | Component | Notes |
 |-----|-----------|-------|
 | 1 | **12VDC DIN-rail PSU, 2A** | Main supply for the whole enclosure. Powers: Uno Q VIN pin, RS485 temp/humidity sensors, and buck converter input. Search: *"Mean Well HDR-30-12"* or *"Mean Well DR-30-12"* (~$15–20). DIN-rail mount keeps wiring clean. 2A provides comfortable headroom for the Uno Q running Linux (~1A peak) plus sensors. |
-| 1 | **12V→5V DC-DC buck converter module** | Derives 5V from the 12V main supply. Powers: relay board coil VCC, PZEM optocoupler logic VCC. Search: *"LM2596 buck converter module"* or *"MP1584 buck converter"* (~$2–4). Set output to 5.0V with a multimeter before connecting. |
+| 1 | **12V→5V DC-DC buck converter module** | Derives 5V from the 12V main supply. Powers: relay board coil VCC. Search: *"LM2596 buck converter module"* or *"MP1584 buck converter"* (~$2–4). Set output to 5.0V with a multimeter before connecting. |
 
 ---
 
@@ -124,8 +127,7 @@ powers the optocoupler input side separately.
 
 | Bus | Protocol | Connected to | Devices on Bus | Max cable length |
 |-----|----------|--------------|----------------|-----------------|
-| RS485 (via USB-RS485 adapter) | Modbus RTU | QRB2210 USB port | 2× SHT30 temp/hum transmitters | 1200m (well within 4m run) |
-| UART direct | Modbus RTU | MCU Serial1 (D0/D1) | 2× PZEM-004T power monitors | ~5m practical (UART level) |
+| RS485 (via USB-RS485 adapter) | Modbus RTU | QRB2210 USB port | 2× SDM120 power monitors + 2× SHT30 temp/hum | 1200m (well within 4m run) |
 | Digital (opto) | Active-low logic | MCU D2–D10 | 9 thermostat/humidity inputs | Determined by opto board |
 | Digital (relay) | Active-low logic | MCU D11–D18 | 8 HVAC control outputs | Relay contacts to load |
 
@@ -134,7 +136,7 @@ powers the optocoupler input side separately.
 ## Where to Buy
 
 - **Arduino Uno Q:** [store-usa.arduino.cc](https://store-usa.arduino.cc) or authorized distributors (Mouser, Digi-Key, Arrow)
-- **PZEM-004T V3.0:** Amazon (search "PZEM-004T V3 split core"), AliExpress, or eBay
+- **Eastron SDM120-Modbus:** Amazon (search "Eastron SDM120 Modbus"), AliExpress, or automation suppliers (e.g. Allied Electronics, AutomationDirect)
 - **RS485 SHT30 transmitters:** Amazon, AliExpress (search "RS485 Modbus SHT30 temperature humidity transmitter"), DFRobot (product-2279)
 - **MAX3485 module:** Amazon (search "MAX3485 3.3V RS485 module"), AliExpress
 - **Opto boards, relay boards, power modules:** Amazon, AliExpress, Digi-Key

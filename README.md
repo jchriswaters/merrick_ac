@@ -36,10 +36,9 @@ hvac-controller/
 - The full bill of materials is in **`docs/component-list.md`**.
 - The MQTT schema is in **`docs/mqtt-payload-spec.md`**.
 - Code files in `mcu/` and `linux/` are stubs — ready to be fleshed out.
-- Temp/humidity sensors (RS485 SHT30) are read by the **Linux side** via a USB-RS485
-  adapter — the MCU does not handle RS485 at all.
-- The two PZEM-004T power monitors connect to the MCU via **Serial1 (D0/D1)** using
-  UART-level Modbus RTU.
+- All sensors and power monitors share a single **RS485 Modbus RTU bus** read by the
+  Linux side via a USB-RS485 adapter — the MCU handles digital I/O only (no sensor code).
+- The RS485 bus carries: 2× Eastron SDM120 energy meters + 2× SHT30 temp/humidity sensors.
 - The STM32 communicates with the Linux side via **Arduino Bridge RPC** (not bare Serial).
 
 ## Key Constraints

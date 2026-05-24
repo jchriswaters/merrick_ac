@@ -227,34 +227,21 @@ InfluxDB. Tag by `mode` for easy filtering of power consumption by operating mod
 
 ## MCU → Linux Compact Key Map
 
-The MCU sends a compact JSON to reduce Bridge RPC payload size. The Linux bridge
-daemon expands these short keys to the human-readable field names above:
+The MCU exposes only relay output states via Bridge RPC (compact JSON to reduce
+payload size). The Linux bridge daemon expands these short keys to human-readable
+field names and merges them with sensor and power data read directly from the RS485
+bus before publishing to MQTT.
 
-| MCU key | Full field name        |
-|---------|------------------------|
-| `hc`    | `high_cool`            |
-| `lc`    | `low_cool`             |
-| `hh`    | `high_heat`            |
-| `rv`    | `reversing_valve`      |
-| `td`    | `theater_damper`       |
-| `dd`    | `downstairs_damper`    |
-| `vo`    | `vent_open`            |
-| `dh`    | `dehumidifier_on`      |
-| `it`    | `indoor_temp_f`        |
-| `ih`    | `indoor_humidity_pct`  |
-| `id`    | `indoor_dewpoint_f`    |
-| `ot`    | `outdoor_temp_f`       |
-| `oh`    | `outdoor_humidity_pct` |
-| `od`    | `outdoor_dewpoint_f`   |
-| `av`    | `ac_voltage_v`         |
-| `aa`    | `ac_current_a`         |
-| `aw`    | `ac_power_w`           |
-| `ak`    | `ac_energy_kwh`        |
-| `af`    | `ac_frequency_hz`      |
-| `ap`    | `ac_power_factor`      |
-| `dv`    | `dehum_voltage_v`      |
-| `da`    | `dehum_current_a`      |
-| `dw`    | `dehum_power_w`        |
-| `dk`    | `dehum_energy_kwh`     |
-| `df`    | `dehum_frequency_hz`   |
-| `dp`    | `dehum_power_factor`   |
+| MCU key | Full field name        | Source        |
+|---------|------------------------|---------------|
+| `hc`    | `high_cool`            | MCU via Bridge |
+| `lc`    | `low_cool`             | MCU via Bridge |
+| `hh`    | `high_heat`            | MCU via Bridge |
+| `rv`    | `reversing_valve`      | MCU via Bridge |
+| `td`    | `theater_damper`       | MCU via Bridge |
+| `dd`    | `downstairs_damper`    | MCU via Bridge |
+| `vo`    | `vent_open`            | MCU via Bridge |
+| `dh`    | `dehumidifier_on`      | MCU via Bridge |
+
+All sensor and power fields (`indoor_*`, `outdoor_*`, `ac_*`, `dehum_*`) are added
+directly by `bridge_daemon.py` from RS485 reads — they are not sourced from the MCU.

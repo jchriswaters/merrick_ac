@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "WebSearch",
+      "WebFetch(domain:docs.arduino.cc)",
+      "WebFetch(domain:www.edaboard.com)",
+      "WebFetch(domain:robocraze.com)",
+      "WebFetch(domain:forum.arduino.cc)",
+      "WebFetch(domain:www.electronics-lab.com)",
+      "Bash(cat)",
+      "Bash(python3 /tmp/update_sysdesign.py)"
+    ]
+  }
+}

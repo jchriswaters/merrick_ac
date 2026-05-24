@@ -11,13 +11,13 @@ The system is split across the two processors on the Uno Q board:
 │  ┌──────────────────────────┐    ┌─────────────────────────┐   │
 │  │   STM32U585 MCU          │    │  QRB2210 Linux (Debian) │   │
 │  │   (Zephyr / Arduino)     │◄──►│                         │   │
-│  │                          │    │  • paho-mqtt client      │   │
 │  │  • Read 9 digital inputs │    │  • paho-mqtt client      │   │
 │  │  • Drive 8 relay outputs │    │  • Flask web config API  │   │
-│  │  • Poll PZEM UART bus    │    │  • JSON config store     │   │
-│  │  • Zone + humidity logic │    │  • Poll RS485 sensors    │   │
-│  │  • Expose state via RPC  │    │    (USB-RS485 adapter)   │   │
+│  │  • Zone + humidity logic │    │  • JSON config store     │   │
+│  │  • Expose state via RPC  │    │  • Poll RS485 bus        │   │
+│  │                          │    │    (sensors + power mon) │   │
 │  │                          │    │  WiFi 5 dual-band        │   │
+│  │                          │    │  (WCBN3536A onboard)    │   │
 │  └──────────────────────────┘    └─────────────────────────┘   │
 │              ▲                          Arduino Bridge RPC       │
 └──────────────┼──────────────────────────────────────────────────┘
@@ -26,7 +26,6 @@ The system is split across the two processors on the Uno Q board:
      │  Physical I/O      │
      │  9 inputs (24VAC)  │
      │  8 relay outputs   │
-     │  UART (PZEM)       │
      └────────────────────┘
 ```
 
@@ -106,7 +105,7 @@ This is required because the STM32U585 is a 3.3V device.
 ## 3.5. Power Distribution
 
 A single 12V DIN-rail PSU is the only AC-DC converter needed for the enclosure.
-A buck converter derives 5V for relay coil and PZEM logic power.
+A buck converter derives 5V for relay coil power.
 
 ```
 AC mains ──► 12V DIN-rail PSU (2A)
@@ -114,16 +113,18 @@ AC mains ──► 12V DIN-rail PSU (2A)
                 ├──► Uno Q VIN pin (via shield screw terminal)
                 │      GND ──► Uno Q GND pin (via shield screw terminal)
                 │
-                ├──► RS485 sensor VCC (4m cable to sensor chain)
+                ├──► RS485 sensor VCC (via 4-conductor cable to sensor chain)
                 │      GND ──► RS485 sensor GND
                 │
                 └──► Buck converter IN (12V)
                            │
                            └──► Buck converter OUT (5V)
-                                    ├──► Relay board VCC (coil power)
-                                    └──► PZEM logic VCC
+                                    └──► Relay board VCC (coil power)
 
 HVAC 24VAC transformer ──► 24VAC→5VDC module ──► Opto board input (LED) side VCC
+
+Note: RS485 energy meters (SDM120) are powered from the AC mains circuits they
+monitor — they draw no power from the 12V DC supply.
 ```
 
 **Uno Q 3.3V pin** (from onboard regulator, via shield screw terminal):
@@ -136,83 +137,65 @@ HVAC 24VAC transformer ──► 24VAC→5VDC module ──► Opto board input 
   USB-C can remain connected for serial monitoring during commissioning — the Uno Q
   will accept power from whichever source is higher, but avoid this in normal operation.
 - Set the buck converter output to exactly 5.0V with a multimeter *before* connecting
-  the relay board or PZEM modules.
+  the relay board.
 - The 24VAC opto supply is galvanically isolated from the DC logic supply — this is
   intentional and required for safe 24VAC input signal conditioning.
 
 ---
 
-## 4. Sensor Buses
+## 4. Sensor and Power Monitor Bus
 
-### 4a. RS485 Modbus RTU Bus — Temperature + Humidity
+### RS485 Modbus RTU Bus — All Field Devices
 
-**Read by the Linux side (QRB2210), not the MCU.**
+**Read entirely by the Linux side (QRB2210) via USB-RS485 adapter. The MCU is not
+involved in any sensor or power monitoring.**
 
-The Arduino Uno Q form factor only exposes one accessible hardware UART (Serial1 on
-D0/D1). Rather than use SoftwareSerial (unreliable for Modbus RTU), the RS485
-temp/humidity sensors are read directly by the Linux side via a **USB-to-RS485 adapter**
-plugged into the QRB2210's USB port. The `bridge_daemon.py` polls both sensors and
-includes readings in the MQTT payload. The MCU is not involved.
-
-The MAX3485 module, Serial2, and D20 direction-control pin are **not used** — D20/SDA
-and Serial2 pins are free for future use.
+All four field devices share a single RS485 Modbus RTU bus connected to the QRB2210
+via a USB-RS485 adapter. The `bridge_daemon.py` polls all devices and assembles the
+full MQTT payload. The MCU only handles digital I/O (thermostat inputs and relay outputs).
 
 ```
-QRB2210 USB port ──► USB-RS485 adapter ──► shielded twisted-pair ──► sensor chain
+QRB2210 USB port ──► USB-RS485 adapter ──► RS485 bus (daisy-chain)
+                                                │
+                                                ├── SDM120 #1, addr 0x03 (AC system)
+                                                ├── SDM120 #2, addr 0x04 (dehumidifier)
+                                                ├── SHT30 #1,  addr 0x01 (indoor)
+                                                └── SHT30 #2,  addr 0x02 (outdoor) ──► 120Ω
 ```
 
-Terminate the far end of the RS485 cable with a **120Ω resistor** across A and B.
-Use **4-conductor shielded 22 AWG cable** (e.g. Belden 9504 or equivalent) — two
-conductors carry RS485 A/B (use the twisted pair if available), the other two carry
-12V and GND for sensor power. RS485 signal lines carry no power themselves.
-Shield drain wire connected to GND at the adapter end only.
+**Recommended daisy-chain order:** Start at the USB-RS485 adapter, wire through the
+SDM120 energy meters (DIN-rail mounted in the enclosure), then exit the enclosure and
+continue to the indoor then outdoor SHT30 sensor. Terminate with a 120Ω resistor
+across A and B at the outdoor sensor (far end of the bus).
 
-**Sensors on this bus:**
+**Cable:** 4-conductor, 22 AWG unshielded twisted pair — fine for a 4m run at 9600 baud.
+Use the twisted pair for RS485 A/B. The other two conductors carry 12V and GND for
+SHT30 sensor power only. SDM120 meters are self-powered from AC mains.
 
-| Device                        | Modbus Addr | DIP setting | Location         |
-|-------------------------------|-------------|-------------|------------------|
-| RS485 SHT30 Temp/Hum xmitter | 0x01        | DIP switch  | Indoor — return air location |
-| RS485 SHT30 Temp/Hum xmitter | 0x02        | DIP switch  | Outdoor — shaded, weatherproof enclosure |
+**Devices on this bus:**
 
-Each transmitter provides: temperature (°C or °F), relative humidity (%RH), dew point.
-Factory calibrated. No user calibration required. Address set by physical DIP switch.
+| Device | Modbus Addr | Address set by | Location / Notes |
+|--------|-------------|----------------|------------------|
+| Eastron SDM120 Modbus | 0x03 | Front panel buttons | In enclosure — AC system (compressor + air handler) |
+| Eastron SDM120 Modbus | 0x04 | Front panel buttons | In enclosure — Dehumidifier circuit |
+| RS485 SHT30 Temp/Hum xmitter | 0x01 | DIP switch | Indoor — return air location |
+| RS485 SHT30 Temp/Hum xmitter | 0x02 | DIP switch | Outdoor — shaded, weatherproof enclosure |
 
-Both sensors share one daisy-chained cable. Set addresses via DIP switch *before*
-installing — no software address programming needed.
+**SDM120 wiring (per unit):**
+- **L + N terminals:** connected to the AC mains circuit being monitored (powers the meter)
+- **CT clamp:** clamped around the **live wire only** of the circuit being monitored
+- **RS485 A/B terminals:** daisy-chained on the bus
+- Ships with default address 0x01 — reprogram to 0x03 / 0x04 via front panel before
+  installation (hold setup button to enter address programming mode)
 
-### 4b. UART Modbus Bus — Power Monitoring (PZEM-004T)
+**Data available per SDM120:**
+- Voltage (V), Current (A), Active Power (W), Apparent Power (VA),
+  Power Factor, Frequency (Hz), Import Energy (kWh)
 
-The two PZEM-004T modules use **UART-level Modbus RTU** (not RS485 differential).
-They connect directly to a **separate** MCU hardware UART (Serial1) — do **not**
-share the RS485 bus with the temp/humidity sensors.
-
-```
-STM32 Serial1 TX ──► PZEM TX (both modules wired in parallel)
-STM32 Serial1 RX ◄── PZEM RX (both modules wired in parallel)
-```
-
-**IMPORTANT:** The PZEM UART side is not galvanically isolated from AC mains on all
-board variants. Verify your specific board includes optocouplers on the UART lines.
-If not, add an external optocoupler between PZEM TX/RX and MCU pins.
-
-Each PZEM module also requires:
-- **L + N** terminals connected to the AC mains circuit it is monitoring
-  (this powers the module's internal MCU — 5V on the UART side is not enough alone)
-- **CT clamp** clamped around the **live wire only** (not neutral, not both)
-
-**PZEM modules on this bus:**
-
-| Device          | Modbus Addr | CT clamp location        | Circuit monitored    |
-|-----------------|-------------|--------------------------|----------------------|
-| PZEM-004T V3.0  | 0x01        | AC system live wire      | Compressor + air handler |
-| PZEM-004T V3.0  | 0x02        | Dehumidifier live wire   | Dehumidifier         |
-
-**One-time address programming:** Each PZEM ships with default address 0xF8. Flash
-the address-programming sketch with one module connected at a time (AC power connected
-to L/N terminals) to burn address 0x01 then 0x02. See code directory for sketch.
-
-**Data available per PZEM module:**
-- Voltage (V), Current (A), Power (W), Energy (kWh), Frequency (Hz), Power Factor
+**SHT30 sensor notes:**
+- Factory calibrated. No user calibration required.
+- Address set by physical DIP switch — set *before* installing.
+- Each transmitter provides: temperature (°F), relative humidity (%RH), dew point (°F).
 
 ---
 
@@ -268,8 +251,9 @@ the internal timer — the OR logic means either source can open the vent.
 
 ### 6a. Bridge Daemon (`linux/bridge_daemon.py`)
 
-- Polls MCU state every **10 seconds** via Arduino Bridge RPC
-- Expands compact MCU JSON keys to human-readable field names
+- Polls MCU relay state every **10 seconds** via Arduino Bridge RPC
+- Polls all RS485 devices (2x SHT30, 2x SDM120) via USB-RS485 adapter
+- Assembles full MQTT payload: relay states + sensor readings + power data
 - Adds derived fields: `mode` (heat/cool/off), `compressor_on` (ac_current_a > 5A),
   `timestamp` (Unix epoch)
 - Publishes full payload to MQTT topic `home/hvac/status` as **retained** message
@@ -307,9 +291,9 @@ Topics:
 |---------|-----------|-----------------------------|----------------|
 | D2–D10  | Input     | Thermostat + humidity signals | Digital (via opto) |
 | D11–D18 | Output    | Relay control               | Digital        |
+| D0/D1   | I/O       | (spare — Serial1 not used)  | —              |
 | D19     | I/O       | (spare)                     | —              |
-| D20/SDA | I/O       | (spare — RS485 DE pin not needed; sensors read by Linux side) | — |
-| Serial1 | UART      | PZEM-004T Modbus            | Modbus RTU     |
+| D20/SDA | I/O       | (spare)                     | —              |
 | Serial2 | UART      | (spare — not accessible on Uno Q shield headers) | — |
 | SCL     | I/O       | (spare — available)         | —              |
 | A0–A5   | Analog    | All spare                   | ADC            |
@@ -321,10 +305,9 @@ Topics:
 - Use the **Arduino Bridge library** for MCU↔Linux communication, not raw Serial
 - All MCU output pins should be explicitly set LOW in `setup()` before any logic runs —
   prevents relay chatter on boot
-- The PZEM library (`PZEM004Tv30`) requires a **hardware UART** — SoftwareSerial
-  will not work reliably with two devices
-- RS485 temp/humidity sensors are read by `bridge_daemon.py` on the Linux side via a
-  USB-RS485 adapter — the MCU sketch does not include any RS485 or SHT30 code
+- All sensors and power monitors are read by `bridge_daemon.py` on the Linux side
+  via the USB-RS485 adapter — the MCU sketch contains **no sensor code at all**
+- D0/D1 (Serial1) are unused and available as spare pins
 - Prefer `INPUT_PULLDOWN` (not INPUT_PULLUP) for thermostat inputs if active-HIGH
   opto outputs are used; verify against your specific opto board's output logic
 - `analogReadResolution(12)` should be called in setup() to enable 12-bit ADC on STM32
