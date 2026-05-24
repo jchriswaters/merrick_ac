@@ -87,12 +87,13 @@ The relay contacts switch 24 VAC control circuits for the HVAC equipment.
 | D11     | high_cool             | Unico Y2 — high-stage cool   | Relay NC → NO when active      |
 | D12     | low_cool              | Unico Y1 — low-stage cool    |                                |
 | D13     | high_heat             | Unico W / W2 — heat stage    |                                |
-| D14     | reversing_valve       | Unico O/B — heat pump rev.   | Energize in COOL mode (O-type) |
-|         |                       |                               | Verify O vs B for your unit    |
+| D14     | reversing_valve       | Unico O/B — heat pump rev.   | B-type: energize in HEAT mode  |
+|         |                       |                               | (OFF during cooling, ON during heating) |
 | D15     | theater_damper_open   | Theater zone powered damper  |                                |
 | D16     | downstairs_damper_open| Downstairs zone powered damper|                               |
 | D17     | vent_open_out         | Fresh-air vent actuator       |                                |
 | D18     | dehumidifier_on       | Dehumidifier relay            |                                |
+| D19     | fan_on                | Unico air handler G wire      | Fan-only mode (no cooling/heat)|
 
 **Relay board wiring note:** Use a board with a VCC/VDD jumper that separates relay
 coil power from the logic input. Connect logic input VCC to the Arduino **3.3V pin**;
@@ -104,8 +105,9 @@ powered via VIN). No external 5V supply is required.
   Never allow cooling and heating relays active simultaneously.
 - Minimum **180 seconds (3 minutes)** must elapse between any mode change to protect
   the compressor from short-cycling.
-- `reversing_valve` follows the cooling state: energized during any cooling call,
-  de-energized during heating. Verify O vs B wiring for your specific Unico model.
+- `reversing_valve` uses **B-type behavior**: energized during any **heating** call,
+  de-energized during cooling. This is confirmed for the Unico/Mitsubishi system in
+  this installation (O/B wire is OFF when thermostat calls for cooling, ON for heating).
 
 ---
 
@@ -225,7 +227,17 @@ Priority order when multiple zones call simultaneously:
    zone thermostats do not trigger high-stage cooling).
 3. **Low cool:** Active when any zone calls for cooling (main Y1, theater Y, downstairs Y).
 4. **Heat:** Active when any zone calls for heat.
-5. **Off:** No zone calling.
+5. **Fan only:** Fan runs, no compressor — used for dehumidifier assist and idle circulation.
+6. **Off:** No zone calling.
+
+**Reversing valve (B-type):** `reversing_valve` (D14) is energized during **heating**,
+de-energized during cooling. This is the confirmed behavior for this Unico/Mitsubishi
+installation (O/B wire OFF = cooling, ON = heating).
+
+**Fan relay:** `fan_on` (D19) drives the Unico air handler G wire. It is energized
+whenever `low_cool`, `high_cool`, or `high_heat` is active, and also independently
+for fan-only mode (dehumidifier assist, idle circulation). The compressor stages
+always imply fan on, but fan can run without a compressor stage.
 
 Mode change interlock: after any output state change, a **180-second lockout** prevents
 any further mode change. This protects the compressor from short-cycling.
@@ -245,6 +257,25 @@ Arduino internal timer    →  vent_open_out = HIGH  (configurable minutes-per-h
 The fresh-air vent timer is configurable via the web API (`/config/vent`). The
 `vent_open_in` hardware input from the humidity controller can override or supplement
 the internal timer — the OR logic means either source can open the vent.
+
+### 5d. Sensor Flags — Linux-to-MCU Bridge
+
+The MCU has no direct access to temperature or humidity sensor data. The Linux side
+(`bridge_daemon.py`) evaluates all environmental thresholds and pushes **five pre-computed
+boolean flags** to the MCU via Arduino Bridge RPC every polling cycle (~10 s). The MCU
+stores these in a `SensorFlags` struct and uses them in `runZoneLogic()`.
+
+| Flag            | Set when                                          | Used by rule(s)          |
+|-----------------|---------------------------------------------------|--------------------------|
+| `heatPumpOk`    | Outdoor temp ≥ 40 °F                              | 2 — heat pump only       |
+| `auxHeatNeeded` | Outdoor temp < 40 °F                              | 4 — add aux electric heat|
+| `tempRisingFast`| Indoor temp rising ≥ 1 °F / 15 min               | 3 — stay on low_cool     |
+| `ventOk`        | Outdoor temp < 60 °F **AND** outdoor hum < 80 %  | 13 — free cooling vent   |
+| `ventBlocked`   | Outdoor humidity ≥ 80 %                           | 12 — vent must stay off  |
+
+Thresholds are configurable via the web API and stored in `/etc/hvac/config.json`.
+The `tempRisingFast` flag requires the Linux side to maintain a rolling 15-minute
+indoor temperature history from the RS485 SHT30 sensor (addr 0x01).
 
 ---
 
@@ -291,9 +322,8 @@ Topics:
 | Pin     | Direction | Function                    | Bus / Protocol |
 |---------|-----------|-----------------------------|----------------|
 | D2–D10  | Input     | Thermostat + humidity signals | Digital (via opto) |
-| D11–D18 | Output    | Relay control               | Digital        |
+| D11–D19 | Output    | Relay control               | Digital        |
 | D0/D1   | I/O       | (spare — Serial1 not used)  | —              |
-| D19     | I/O       | (spare)                     | —              |
 | D20/SDA | I/O       | (spare)                     | —              |
 | Serial2 | UART      | (spare — not accessible on Uno Q shield headers) | — |
 | SCL     | I/O       | (spare — available)         | —              |

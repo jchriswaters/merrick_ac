@@ -83,12 +83,13 @@ not 5V. The STM32U585 input pins are 3.3V maximum — feeding 5V will damage the
 
 ## Output Relay Board
 
-Drives all 8 HVAC control outputs. MCU pins drive the relay coils via optocouplers;
+Drives all 9 HVAC control outputs. MCU pins drive the relay coils via optocouplers;
 relay contacts switch 24VAC to the HVAC equipment.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **8-channel 5V relay module, optocoupler-isolated** | Must have a **VCC/VDD jumper** separating relay coil power from logic input power. Wire: logic input VCC → Arduino **3.3V pin**; relay coil VCC → Arduino **5V pin**. Relay contacts rated for at least 10A/250VAC. ~$5–8. The Arduino 5V pin (supplied from the onboard regulator when powered via VIN) provides 5V coil power without a separate supply. |
+| 1 | **8-channel 5V relay module, optocoupler-isolated** | Must have a **VCC/VDD jumper** separating relay coil power from logic input power. Wire: logic input VCC → Arduino **3.3V pin**; relay coil VCC → Arduino **5V pin**. Relay contacts rated for at least 10A/250VAC. ~$5–8. The Arduino 5V pin (supplied from the onboard regulator when powered via VIN) provides 5V coil power without a separate supply. Handles outputs on D11–D18. |
+| 1 | **Single-channel 5V relay module, optocoupler-isolated** | Same wiring as above (logic 3.3V, coil 5V). For the fan relay on D19 (Unico G wire). An individual module keeps the channel count clean without needing a 9th channel on a larger board. ~$2–4. Alternatively use a second 8-channel board and leave 7 channels unpopulated. |
 
 ---
 
@@ -135,7 +136,7 @@ existing HVAC thermostat wiring — no AC-DC conversion module required.
 |-----|----------|--------------|----------------|-----------------|
 | RS485 (via USB-RS485 adapter) | Modbus RTU | QRB2210 USB port | 2× SDM120 power monitors + 2× SHT30 temp/hum | 1200m (well within 4m run) |
 | 24VAC relay contacts | Active-high (3.3V) | MCU D2–D10 | 9 thermostat/humidity inputs | Relay contact to MCU pin |
-| Digital (relay) | Active-low logic | MCU D11–D18 | 8 HVAC control outputs | Relay contacts to load |
+| Digital (relay) | Active-high logic | MCU D11–D19 | 9 HVAC control outputs | Relay contacts to load |
 
 ---
 

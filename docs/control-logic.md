@@ -1,16 +1,148 @@
-1. The main thermostat controls heating and cooling on the unico unit.  The theater room and downstairs room thermostats will only modulate the position of the the dampers to each room.
-2. When the main thermostat calls for heating and the temperature outside is above a configurable threshold (defaulting to 40 degrees F), then the controller should turn on the bypass valve and call for cooling low on the UNICO unit
-3. If the inside temperature does not increase at a rate above a minimmum threshold (default to 1 degree F per 15 minutes) then the controller should call for cooling high to the unico unit.
-4. If the outside temerature is below 40 deg F (configurable), then in addition to the logic above to control the unico unit, the controller should also call for heat so that the auxilliary electric heater will turn on.
-5. When the main thermostat calls for cooling and the humidity input is not on, then the controller should make a cooling low call to the unico unit
-6. if the main thermostat calls for cooling and the humidity input is on then the controller should make a call for cooling high to the unico unit.
-7. if there is no call for cooling, but the humidity sensor is on, then the output to the dehumidifier should turn on and the unico fan should turn on.
-8. If there is still no call for cooling, and the dehumidifier has been on for at least 20 minutes (configurable) and the humidity sensor is still on, then we need to turn off the dehumidifier and turn on the high cooling to the unico unit until the humidity sensor is off.
-9. whenever the dehumidifier is on, the unico should not be cooling, but the fan on the unico unit should be on.
-   whenever the unico unit is cooling, the dehumidifier should be off(we don't want the warm air from the dehumidifier heating up the coils on the unico's air condenser) - the dehumidifier's air outlet is into the unico air handler before the condenser coil.
-   If the downstairs or theater room thermostats call for cooling, and the unico unit is cooling, or when the downstairs damper calls for heat and the unit is heating, then the damper to that room should be open
-   if the humidity outside is > 80% the vent output should always be off.
-   If we can get some free cooling when the outside temperature is lower than 60 degrees F (configurable) and the outside humidity is lower than that configurable 80% (same constant as for when the vent should stay closed) then the vent should be open
-   Generally we want some continuous air movement through the house, so when no thermostat is calling for heat or for cool, the fan on the unico unit should run and the vents to each room should be open.
-   Generally we want to follow fresh air guidance on the house - so would like (as long as the obove constraints are followed) to let in as much fresh air as possible.The house has about 4200 square feet of space - the ceilings are all 10 feet tall.
-   
+
+# Control Logic — Uno Q HVAC Controller
+
+## Overview
+
+The Unico mini-duct system is a heat pump (Mitsubishi variable speed compressor)
+with auxiliary electric resistance heat. Control is split:
+- **Main thermostat** drives the Unico compressor and air handler.
+- **Theater and downstairs thermostats** only open/close their zone dampers.
+- All temperature/humidity threshold decisions are made on the Linux side and
+  delivered to the MCU as pre-computed boolean SensorFlags (see system-design.md §5d).
+
+---
+
+## Relay reference
+
+| Output        | Pin | Notes                                              |
+|---------------|-----|----------------------------------------------------|
+| high_cool     | D11 | Unico Y2 — high-stage cooling                      |
+| low_cool      | D12 | Unico Y1 — low-stage cooling                       |
+| high_heat     | D13 | Aux electric heater                                |
+| reversing_valve | D14 | **B-type** — HIGH during heating, LOW during cooling |
+| theater_damper | D15 | Theater zone damper open                          |
+| downstairs_damper | D16 | Downstairs zone damper open                   |
+| vent_out      | D17 | Fresh-air vent actuator open                       |
+| dehumidifier  | D18 | Dehumidifier on                                    |
+| fan           | D19 | Unico G wire — fan-only (no compressor)            |
+
+---
+
+## Rules
+
+### 1. Zone authority
+The main thermostat controls the Unico unit (compressor stages, heat, fan).
+The theater and downstairs thermostats **only** modulate the damper position
+for their respective rooms — they do not call the Unico directly.
+
+### 2. Heat call — heat pump (outdoor temp ≥ 40 °F)
+When the main thermostat calls for heat **and** `SensorFlags.heatPumpOk` is true
+(outdoor ≥ configurable 40 °F threshold):
+- Turn on `reversing_valve` (B-type — energize for heating)
+- Call `low_cool` (low-stage heat pump in heating mode)
+- Turn on `fan`
+
+### 3. Heat call — heat pump not keeping up
+If the main thermostat is calling for heat and `SensorFlags.tempRisingFast` is
+**false** (indoor temperature not rising ≥ 1 °F / 15 min as measured by Linux):
+- Escalate from `low_cool` to `high_cool` (high-stage heat pump)
+- Keep `reversing_valve` on, keep `fan` on
+
+### 4. Heat call — outdoor below aux heat threshold (outdoor temp < 40 °F)
+When `SensorFlags.auxHeatNeeded` is true (outdoor < configurable 40 °F threshold):
+- Apply the same heat pump logic as rules 2–3 **plus**
+- Also energize `high_heat` (aux electric heater runs simultaneously)
+- The compressor breaker and the aux heater breaker are separately sized to
+  handle simultaneous operation.
+
+### 5. Cool call — no humidity alert
+When the main thermostat calls for cooling and `high_humidity` input is LOW:
+- Call `low_cool`
+- Turn on `fan`
+- `reversing_valve` remains de-energized (B-type = cooling)
+
+### 6. Cool call — humidity alert active
+When the main thermostat calls for cooling and `high_humidity` input is HIGH:
+- Call `high_cool` (the Mitsubishi variable-speed compressor requires high stage
+  to achieve meaningful moisture removal; low stage is ineffective for dehumidification)
+- Turn on `fan`
+- `reversing_valve` remains de-energized
+
+### 7. Humidity alert — no cooling call (dehumidifier phase)
+When `high_humidity` input is HIGH but **no** cooling call is active:
+- Turn on `dehumidifier`
+- Turn on `fan` (air handler moves conditioned air past dehumidifier outlet)
+- Do **not** run `low_cool` or `high_cool` (dehumidifier warm-air outlet feeds
+  into the air handler before the condenser coil — running the compressor
+  simultaneously would heat the coils)
+- Record the time the dehumidifier turned on (`dehumStartMs`)
+
+### 8. Humidity alert — dehumidifier timeout
+If the dehumidifier has been running (per rule 7) for at least
+`cfg.dehumMaxMinutes` (default 20 minutes) and `high_humidity` is still HIGH:
+- Turn off `dehumidifier`
+- Call `high_cool` until `high_humidity` clears
+- Once `high_humidity` goes LOW, return to idle (rule 14)
+
+### 9. Mutual exclusion — dehumidifier and compressor
+- When `dehumidifier` is ON: `low_cool` and `high_cool` must both be OFF.
+  `fan` must be ON.
+- When `low_cool` or `high_cool` is ON: `dehumidifier` must be OFF.
+  (Dehumidifier exhaust is warm air fed into the air handler upstream of the
+  condenser coil. Running both simultaneously degrades cooling efficiency.)
+
+### 10. Zone dampers — cooling
+When a zone thermostat (theater or downstairs) calls for cooling **and** the
+Unico is running `low_cool` or `high_cool`, open that zone's damper.
+- `theater_damper` open when theater_cool is active AND unico is cooling
+  (and `cfg.theaterEnabled` is true)
+- `downstairs_damper` open when downstairs_cool is active AND unico is cooling
+
+### 11. Zone dampers — heating
+When a zone thermostat calls for heat **and** the Unico is running in heat mode,
+open that zone's damper.
+- `theater_damper` open when theater_heat is active AND unico is heating
+- `downstairs_damper` open when downstairs_heat is active AND unico is heating
+
+When only the main zone is calling (no theater or downstairs call), both dampers
+remain closed so full duct capacity serves the main zone.
+
+### 12. Ventilation — outdoor humidity block
+If outdoor humidity ≥ 80 % (`SensorFlags.ventBlocked` is true), `vent_out` must
+remain OFF regardless of all other conditions.
+
+### 13. Ventilation — free cooling
+If `SensorFlags.ventOk` is true (outdoor temp < 60 °F **and** outdoor humidity
+< 80 %) and rule 12 is not blocking, open `vent_out` to bring in free cool air.
+
+### 14. Idle — no heat or cool call
+When no thermostat is calling for heat or cooling:
+- Run `fan` (continuous air circulation)
+- Open both zone dampers (`theater_damper`, `downstairs_damper`) for whole-house
+  circulation
+- Apply vent rules 12–13 (open vent if conditions allow fresh air)
+- All compressor outputs (`low_cool`, `high_cool`, `high_heat`) remain OFF
+
+### 15. Fresh air guidance
+The house is approximately 4,200 sq ft with 10 ft ceilings (~42,000 cu ft of
+space). Maximize fresh air intake subject to constraints:
+- Rule 12 always blocks vent when outdoor humidity ≥ 80 %
+- Rule 13 opens vent for free cooling when conditions are favourable
+- The vent can also be opened on a configurable timer (`cfg.ventMinPerHour`)
+  independently of temperature/humidity conditions
+- The `vent_open_in` hardware input from an external humidity controller timer
+  (D10) can also open the vent as an OR with the internal timer
+
+---
+
+## Safety interlocks (enforced in firmware regardless of logic above)
+
+1. `low_cool`, `high_cool`, and `high_heat` are **mutually exclusive** with each
+   other — only one may be active at a time. `high_heat` (aux electric) may run
+   simultaneously with heat pump stages during cold-weather heating (rule 4).
+2. A **180-second lockout** follows any compressor mode change. No further mode
+   change is permitted during this window.
+3. `reversing_valve` is de-energized whenever the system is in cooling mode or
+   fully off (B-type wiring confirmed for this installation).
+4. All output pins are driven LOW in `setup()` before any logic runs to prevent
+   relay chatter on power-up.
