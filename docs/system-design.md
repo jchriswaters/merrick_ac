@@ -103,6 +103,44 @@ This is required because the STM32U585 is a 3.3V device.
 
 ---
 
+## 3.5. Power Distribution
+
+A single 12V DIN-rail PSU is the only AC-DC converter needed for the enclosure.
+A buck converter derives 5V for relay coil and PZEM logic power.
+
+```
+AC mains ──► 12V DIN-rail PSU (2A)
+                │
+                ├──► Uno Q VIN pin (via shield screw terminal)
+                │      GND ──► Uno Q GND pin (via shield screw terminal)
+                │
+                ├──► RS485 sensor VCC (4m cable to sensor chain)
+                │      GND ──► RS485 sensor GND
+                │
+                └──► Buck converter IN (12V)
+                           │
+                           └──► Buck converter OUT (5V)
+                                    ├──► Relay board VCC (coil power)
+                                    └──► PZEM logic VCC
+
+HVAC 24VAC transformer ──► 24VAC→5VDC module ──► Opto board input (LED) side VCC
+```
+
+**Uno Q 3.3V pin** (from onboard regulator, via shield screw terminal):
+- → Relay board logic input VCC (keeps relay logic at 3.3V, matching STM32U585 GPIO)
+
+**Key points:**
+- The VIN pin accepts 6–12V DC. 12V from the DIN-rail supply is correct.
+- Do **not** connect both VIN and USB-C simultaneously as primary power sources.
+  USB-C can remain connected for serial monitoring during commissioning — the Uno Q
+  will accept power from whichever source is higher, but avoid this in normal operation.
+- Set the buck converter output to exactly 5.0V with a multimeter *before* connecting
+  the relay board or PZEM modules.
+- The 24VAC opto supply is galvanically isolated from the DC logic supply — this is
+  intentional and required for safe 24VAC input signal conditioning.
+
+---
+
 ## 4. Sensor Buses
 
 ### 4a. RS485 Modbus RTU Bus — Temperature + Humidity

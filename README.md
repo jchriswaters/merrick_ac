@@ -36,10 +36,10 @@ hvac-controller/
 - The full bill of materials is in **`docs/component-list.md`**.
 - The MQTT schema is in **`docs/mqtt-payload-spec.md`**.
 - Code files in `mcu/` and `linux/` are stubs — ready to be fleshed out.
-- All sensor buses use **RS485 Modbus RTU**. A single MAX3485 transceiver bridges the
-  STM32 UART to the RS485 bus that carries both temp/humidity transmitters. The two
-  PZEM-004T power monitors use a **separate** UART port (Serial1) with their own
-  Modbus addresses.
+- Temp/humidity sensors (RS485 SHT30) are read by the **Linux side** via a USB-RS485
+  adapter — the MCU does not handle RS485 at all.
+- The two PZEM-004T power monitors connect to the MCU via **Serial1 (D0/D1)** using
+  UART-level Modbus RTU.
 - The STM32 communicates with the Linux side via **Arduino Bridge RPC** (not bare Serial).
 
 ## Key Constraints
@@ -49,5 +49,7 @@ hvac-controller/
   reaching MCU pins
 - Heat and cool outputs are **hardware-interlocked** — never active simultaneously
 - Compressor protection: **3-minute minimum delay** between mode changes
-- The Uno Q uses **USB-C Power Delivery** for power input — requires a PD-compatible
-  12V supply or powered USB-C hub; standard barrel-jack supplies do not apply
+- For permanent installation, power the Uno Q via the **VIN pin (6–12V DC)** from a
+  DIN-rail 12V supply wired to the VIN and GND screw terminals on the shield — more
+  robust than USB-C for an enclosure. USB-C accepts standard 5V 3A (no Power Delivery
+  required) and is suitable for bench/development use. No barrel jack on the Uno Q.

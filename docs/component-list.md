@@ -15,8 +15,8 @@ All quantities are for a single-controller installation covering:
 
 | Qty | Component | Description / Notes |
 |-----|-----------|---------------------|
-| 1 | **Arduino Uno Q** | Main controller — QRB2210 Linux MPU + STM32U585 MCU on one board. Requires USB-C Power Delivery input. Get the 4GB RAM / 32GB eMMC variant for comfortable Linux headroom. |
-| 1 | **USB-C PD power supply, 12V 2A min** | Must be USB Power Delivery (PD) compatible. A standard USB-C phone charger at 5V is insufficient. Use a 12V PD adapter or a powered USB-C dock with PD passthrough. |
+| 1 | **Arduino Uno Q** | Main controller — QRB2210 Linux MPU + STM32U585 MCU on one board. Get the 4GB RAM / 32GB eMMC variant for comfortable Linux headroom. For permanent installation, powered via the VIN pin from the 12V DIN-rail supply (see Power Supplies section). |
+| 1 | **USB-C cable (data-capable)** | For initial setup, programming, and bench development only. Must be a full data cable — charge-only cables will not connect. Standard 5V 3A supply is sufficient; Power Delivery is not required. Not used for permanent power in the enclosure. |
 
 ---
 
@@ -85,10 +85,14 @@ Drives all 8 HVAC control outputs.
 
 ## Power Supplies
 
+A single 12V DIN-rail PSU powers everything in the enclosure. A small buck converter
+derives the 5V needed for relay coils and PZEM logic. The HVAC 24VAC transformer
+powers the optocoupler input side separately.
+
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **5VDC regulated supply, 1A** | Powers: relay board coil side, PZEM optocoupler logic side. Can use a small HLK-5M05 AC-DC module inside the enclosure, or a wall-wart into the enclosure. |
-| 1 | **12VDC regulated supply, 500mA** | Powers: both RS485 temp/humidity transmitters (they accept 5–36V; 12V is clean and widely available). Can share with a 12V→5V buck converter if only one supply is desired. |
+| 1 | **12VDC DIN-rail PSU, 2A** | Main supply for the whole enclosure. Powers: Uno Q VIN pin, RS485 temp/humidity sensors, and buck converter input. Search: *"Mean Well HDR-30-12"* or *"Mean Well DR-30-12"* (~$15–20). DIN-rail mount keeps wiring clean. 2A provides comfortable headroom for the Uno Q running Linux (~1A peak) plus sensors. |
+| 1 | **12V→5V DC-DC buck converter module** | Derives 5V from the 12V main supply. Powers: relay board coil VCC, PZEM optocoupler logic VCC. Search: *"LM2596 buck converter module"* or *"MP1584 buck converter"* (~$2–4). Set output to 5.0V with a multimeter before connecting. |
 
 ---
 
@@ -111,7 +115,7 @@ Drives all 8 HVAC control outputs.
 | Qty | Component | Notes |
 |-----|-----------|-------|
 | 1 | **Home Assistant server** (Raspberry Pi 4 / 5, or existing NAS/PC) | Acts as MQTT broker, provides dashboards, historical logging, and automations based on the HVAC status topic. Alternatively use a standalone Mosquitto broker on any Linux machine. |
-| 1 | **Mini UPS / battery backup** | HVAC controllers should survive short power interruptions without resetting. A small UPS or DC UPS module (12V, ~2Ah) protects the Uno Q and preserves the Linux filesystem cleanly. |
+| 1 | **Mini UPS / battery backup, 12V** | HVAC controllers should survive short power interruptions without resetting. A DC UPS module that accepts 12V input and provides 12V output on battery backup protects the Uno Q and preserves the Linux filesystem cleanly. Search: *"12V DC UPS module lithium"*. |
 | 1 | **Ferrite choke** (for RS485 cable entry) | Reduces EMI pickup from nearby relay switching and motor loads |
 
 ---
