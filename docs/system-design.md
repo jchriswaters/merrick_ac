@@ -130,7 +130,8 @@ HVAC 24VAC transformer ──► 24VAC→5VDC module ──► Opto board input 
 - → Relay board logic input VCC (keeps relay logic at 3.3V, matching STM32U585 GPIO)
 
 **Key points:**
-- The VIN pin accepts 6–12V DC. 12V from the DIN-rail supply is correct.
+- The VIN pin accepts 7–24V DC. 12V from the DIN-rail supply is the recommended choice
+  — efficient for buck conversion to 5V and runs the onboard regulator cooler than 24V.
 - Do **not** connect both VIN and USB-C simultaneously as primary power sources.
   USB-C can remain connected for serial monitoring during commissioning — the Uno Q
   will accept power from whichever source is higher, but avoid this in normal operation.

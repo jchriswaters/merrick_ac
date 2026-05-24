@@ -15,7 +15,7 @@ All quantities are for a single-controller installation covering:
 
 | Qty | Component | Description / Notes |
 |-----|-----------|---------------------|
-| 1 | **Arduino Uno Q** | Main controller — QRB2210 Linux MPU + STM32U585 MCU on one board. Get the 4GB RAM / 32GB eMMC variant for comfortable Linux headroom. For permanent installation, powered via the VIN pin from the 12V DIN-rail supply (see Power Supplies section). |
+| 1 | **Arduino Uno Q** | Main controller — QRB2210 Linux MPU + STM32U585 MCU on one board. Get the 4GB RAM / 32GB eMMC variant for comfortable Linux headroom. For permanent installation, powered via the VIN pin (accepts 7–24V DC) from the 12V DIN-rail supply (see Power Supplies section). |
 | 1 | **USB-C cable (data-capable)** | For initial setup, programming, and bench development only. Must be a full data cable — charge-only cables will not connect. Standard 5V 3A supply is sufficient; Power Delivery is not required. Not used for permanent power in the enclosure. |
 
 ---
