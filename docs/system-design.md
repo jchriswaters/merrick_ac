@@ -209,13 +209,21 @@ SHT30 sensor power only. SDM120 meters are self-powered from AC mains.
 The system has three zones: **main** (always active), **downstairs** (always active),
 **theater** (software-gated by `theaterEnabled` configuration flag).
 
-Zone dampers follow the calling zone:
-- `theater_damper_open` = HIGH when theater_cool OR theater_heat is active
-  (and theaterEnabled = true)
-- `downstairs_damper_open` = HIGH when downstairs_cool OR downstairs_heat is active
+**The main thermostat is the sole authority over the Unico unit.** Secondary zone
+thermostats (theater, downstairs) never change what the compressor or fan does —
+they only open or close the damper for their room.
 
-When only the main zone is calling, both dampers remain closed (main zone uses the
-full duct capacity).
+**Default damper state is open.** A secondary zone damper closes *only* when the
+zone thermostat is actively calling for the opposite of what the main is currently
+running (to avoid forcing unwanted hot or cold air into a room that doesn't want it).
+
+| Secondary zone state | Main unit mode | Damper |
+|----------------------|----------------|--------|
+| Not calling (satisfied) | Any          | **Open** |
+| Calling heat         | Heating        | **Open** |
+| Calling cool         | Cooling        | **Open** |
+| Calling heat         | Cooling        | **Closed** — protect room from unwanted cold |
+| Calling cool         | Heating        | **Closed** — protect room from unwanted heat |
 
 ### 5b. Mode Arbitration
 
@@ -238,6 +246,10 @@ installation (O/B wire OFF = cooling, ON = heating).
 whenever `low_cool`, `high_cool`, or `high_heat` is active, and also independently
 for fan-only mode (dehumidifier assist, idle circulation). The compressor stages
 always imply fan on, but fan can run without a compressor stage.
+
+**Note on zone dampers in mode arbitration:** Secondary zone dampers are not
+determined by the zone arbitration priority list above — they follow the separate
+table in §5a. The Unico operating mode is determined solely by the main thermostat.
 
 Mode change interlock: after any output state change, a **180-second lockout** prevents
 any further mode change. This protects the compressor from short-cycling.

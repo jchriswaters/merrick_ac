@@ -91,21 +91,30 @@ If the dehumidifier has been running (per rule 7) for at least
   (Dehumidifier exhaust is warm air fed into the air handler upstream of the
   condenser coil. Running both simultaneously degrades cooling efficiency.)
 
-### 10. Zone dampers — cooling
-When a zone thermostat (theater or downstairs) calls for cooling **and** the
-Unico is running `low_cool` or `high_cool`, open that zone's damper.
-- `theater_damper` open when theater_cool is active AND unico is cooling
-  (and `cfg.theaterEnabled` is true)
-- `downstairs_damper` open when downstairs_cool is active AND unico is cooling
+### 10. Zone dampers — general authority
+The main thermostat is the sole authority over the Unico unit. Secondary zone
+thermostats (theater, downstairs) **only** open or close their room damper —
+they never change what the compressor or fan does.
 
-### 11. Zone dampers — heating
-When a zone thermostat calls for heat **and** the Unico is running in heat mode,
-open that zone's damper.
-- `theater_damper` open when theater_heat is active AND unico is heating
-- `downstairs_damper` open when downstairs_heat is active AND unico is heating
+The **default damper state is open**. A secondary zone damper closes only when
+that zone is actively requesting the opposite of what the main thermostat is
+currently running. This prevents forcing unwanted hot or cold air into a room
+while still allowing conditioned air to circulate freely to satisfied rooms.
 
-When only the main zone is calling (no theater or downstairs call), both dampers
-remain closed so full duct capacity serves the main zone.
+| Secondary zone state | Main unit mode | Damper action |
+|----------------------|----------------|---------------|
+| Not calling (satisfied) | Any          | **Open** |
+| Calling heat         | Heating        | **Open** |
+| Calling cool         | Cooling        | **Open** |
+| Calling heat         | Cooling        | **Closed** |
+| Calling cool         | Heating        | **Closed** |
+
+Theater damper is also gated by `cfg.theaterEnabled` — if the theater zone is
+disabled in config, its damper stays open unconditionally.
+
+### 11. Zone dampers — no Unico call (idle)
+When the main thermostat is not calling for heat or cool (idle / fan-only mode),
+both secondary zone dampers remain **open** for whole-house circulation.
 
 ### 12. Ventilation — outdoor humidity block
 If outdoor humidity ≥ 80 % (`SensorFlags.ventBlocked` is true), `vent_out` must
@@ -118,8 +127,8 @@ If `SensorFlags.ventOk` is true (outdoor temp < 60 °F **and** outdoor humidity
 ### 14. Idle — no heat or cool call
 When no thermostat is calling for heat or cooling:
 - Run `fan` (continuous air circulation)
-- Open both zone dampers (`theater_damper`, `downstairs_damper`) for whole-house
-  circulation
+- Both zone dampers are open by default (rule 10 — no conflicting call, so no reason
+  to close them); conditioned air circulates to all rooms
 - Apply vent rules 12–13 (open vent if conditions allow fresh air)
 - All compressor outputs (`low_cool`, `high_cool`, `high_heat`) remain OFF
 
