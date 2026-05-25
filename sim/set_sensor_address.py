@@ -68,7 +68,8 @@ def _mb_write(client, address, value, dev_id):
 
 # ── address register candidates (most-likely first) ──────────
 
-ADDR_REGS = [0x0101, 0x0200, 0x07D0, 0x0100]
+ADDR_REGS = [0x0066,   # confirmed for this sensor (decoded from raw frame 01 06 00 66 ...)
+             0x0101, 0x0200, 0x07D0, 0x0100]   # other common variants
 
 # ── scan ─────────────────────────────────────────────────────
 
