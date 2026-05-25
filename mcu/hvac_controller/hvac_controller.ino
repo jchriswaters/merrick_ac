@@ -21,9 +21,11 @@
  *
  * Libraries required:
  *   - Arduino Bridge (built-in Uno Q support)
+ *   - Arduino_LED_Matrix (built-in 12x8 LED matrix)
  */
 
 #include <Bridge.h>
+#include <Arduino_LED_Matrix.h>
 
 // ─────────────────────────────────────────────────────────────
 // PIN DEFINITIONS
@@ -517,6 +519,152 @@ void handleBridgeCommands() {
 }
 
 // ─────────────────────────────────────────────────────────────
+// LED MATRIX DIAGNOSTICS
+//
+// The built-in 12-column × 8-row LED matrix displays a rotating
+// two-page diagnostic readout:
+//
+//   Page 0 — MODE (3 s)
+//   ┌─────────────────────────────────────────┐
+//   │ col:  0 1 2   4   5   7   9  11         │
+//   │ r 0:  [glyph ]   ·   ·   ·  ♥  ← heartbeat (blinks 1 Hz)
+//   │ r 1:  [glyph ]   ·   ·   ·              │
+//   │ r 2:  [glyph ]                          │
+//   │ r 3:  [glyph ]   ·   ·   ·  ⚡ ← interlock blink
+//   │ r 4:  [glyph ]                          │
+//   │ r 5:                             ◌ ← vent open
+//   │ r 7:                             ◌ ← high humidity
+//   └─────────────────────────────────────────┘
+//
+//   Glyph (cols 0-2, rows 1-5, 3×5 pixel font):
+//     H = heating   C = cooling   d = dehumidify
+//     I = idle      O = override  L = locked (interlock)
+//
+//   Col 5 dots  (rows 1/3): high-stage / low-stage compressor
+//   Col 7 dots  (rows 1/3): reversing valve energised / aux heat on
+//   Col 9 dots  (rows 1/3): fan on / dehumidifier on
+//
+//   Page 1 — RELAY GRID (3 s)
+//   ┌──────────────────────────────────────────┐
+//   │      col 1   col 5   col 9   col 11      │
+//   │ r 0:  HC      LC      HH       ♥          │
+//   │ r 3:  RV      TD      DD                  │
+//   │ r 6:  FN      VO      DH                  │
+//   └──────────────────────────────────────────┘
+//   HC=high_cool  LC=low_cool   HH=high_heat
+//   RV=rev_valve  TD=theater    DD=downstairs
+//   FN=fan        VO=vent_out   DH=dehumidifier
+//   Lit = relay energised, dark = off.
+// ─────────────────────────────────────────────────────────────
+
+ArduinoLEDMatrix ledMatrix;
+
+// Display timing
+static unsigned long matPageMs  = 0;        // last page flip
+static unsigned long matHeartMs = 0;        // last heartbeat edge
+static uint8_t       matPage    = 0;        // 0=mode, 1=relays
+static bool          matHeart   = false;    // heartbeat state
+
+const unsigned long MAT_PAGE_MS  = 3000UL; // page hold time
+const unsigned long MAT_HEART_MS =  500UL; // heartbeat half-period (1 Hz)
+
+// 3-wide x 5-tall pixel glyphs (row-major, top-to-bottom)
+typedef uint8_t Glyph[5][3];
+
+static const Glyph GL_HEAT = {             // H
+  {1,0,1},{1,0,1},{1,1,1},{1,0,1},{1,0,1}
+};
+static const Glyph GL_COOL = {             // C
+  {1,1,1},{1,0,0},{1,0,0},{1,0,0},{1,1,1}
+};
+static const Glyph GL_DEHUM = {            // d
+  {1,1,0},{1,0,1},{1,0,1},{1,0,1},{1,1,0}
+};
+static const Glyph GL_IDLE = {             // I
+  {1,1,1},{0,1,0},{0,1,0},{0,1,0},{1,1,1}
+};
+static const Glyph GL_OVRD = {             // O
+  {0,1,0},{1,0,1},{1,0,1},{1,0,1},{0,1,0}
+};
+static const Glyph GL_LOCK = {             // L
+  {1,0,0},{1,0,0},{1,0,0},{1,0,0},{1,1,1}
+};
+
+// Draw a 3×5 glyph into frame[] starting at (r0, c0)
+static void matGlyph(uint8_t fr[][12], const Glyph &g, uint8_t r0, uint8_t c0) {
+  for (uint8_t r = 0; r < 5; r++)
+    for (uint8_t c = 0; c < 3; c++)
+      fr[r0 + r][c0 + c] = g[r][c];
+}
+
+// Page 0: mode letter + key relay indicator dots
+static void matDrawMode(uint8_t fr[][12]) {
+  bool isHeating = out.revValve && (out.lowCool || out.highCool);
+  bool isCooling = (!out.revValve) && (out.lowCool || out.highCool);
+
+  const Glyph *g;
+  if      (cfg.modeOverride)                              g = &GL_OVRD;
+  else if (interlockActive() && !isHeating && !isCooling) g = &GL_LOCK;
+  else if (isHeating)                                     g = &GL_HEAT;
+  else if (isCooling)                                     g = &GL_COOL;
+  else if (out.dehumOn)                                   g = &GL_DEHUM;
+  else                                                    g = &GL_IDLE;
+
+  matGlyph(fr, *g, 1, 0);   // centred vertically (rows 1-5, cols 0-2)
+
+  // col 5: compressor stage (high=row1, low=row3)
+  if (out.highCool)  fr[1][5] = 1;
+  if (out.lowCool)   fr[3][5] = 1;
+
+  // col 7: reversing valve (heating mode) + aux electric heat
+  if (out.revValve)  fr[1][7] = 1;
+  if (out.highHeat)  fr[3][7] = 1;
+
+  // col 9: fan + dehumidifier
+  if (out.fanOn)     fr[1][9] = 1;
+  if (out.dehumOn)   fr[3][9] = 1;
+
+  // col 11: interlock blink / vent open / high humidity flag
+  if (interlockActive() && matHeart) fr[3][11] = 1;
+  if (out.ventOut)                   fr[5][11] = 1;
+  if (inp.highHumidity)              fr[7][11] = 1;
+}
+
+// Page 1: 3×3 relay state grid (one dot per relay)
+static void matDrawRelays(uint8_t fr[][12]) {
+  const uint8_t C[3] = {1, 5, 9};   // three output columns
+
+  fr[0][C[0]] = out.highCool      ? 1 : 0;  // HC
+  fr[0][C[1]] = out.lowCool       ? 1 : 0;  // LC
+  fr[0][C[2]] = out.highHeat      ? 1 : 0;  // HH
+
+  fr[3][C[0]] = out.revValve      ? 1 : 0;  // RV
+  fr[3][C[1]] = out.theaterDamper ? 1 : 0;  // TD
+  fr[3][C[2]] = out.downDamper    ? 1 : 0;  // DD
+
+  fr[6][C[0]] = out.fanOn         ? 1 : 0;  // FN
+  fr[6][C[1]] = out.ventOut       ? 1 : 0;  // VO
+  fr[6][C[2]] = out.dehumOn       ? 1 : 0;  // DH
+}
+
+// Call from loop() — draws the current page and ticks heartbeat/flip
+void updateLEDMatrix() {
+  unsigned long now = millis();
+
+  if (now - matHeartMs >= MAT_HEART_MS) { matHeart = !matHeart; matHeartMs = now; }
+  if (now - matPageMs  >= MAT_PAGE_MS)  { matPage  = (matPage + 1) % 2; matPageMs = now; }
+
+  uint8_t fr[8][12] = {};            // zero = all LEDs off
+
+  if (matPage == 0) matDrawMode(fr);
+  else              matDrawRelays(fr);
+
+  fr[0][11] = matHeart ? 1 : 0;     // heartbeat: top-right corner, both pages
+
+  ledMatrix.renderBitmap(fr, 8, 12);
+}
+
+// ─────────────────────────────────────────────────────────────
 // SETUP
 // ─────────────────────────────────────────────────────────────
 
@@ -568,7 +716,16 @@ void setup() {
   lastCompressorOffMs = millis() - INTERLOCK_MS;
   ventHourStartMs     = millis();
 
+  // ── LED matrix ─────────────────────────────────────────────
+  ledMatrix.begin();
+
   // ── Start Bridge (blocks until Linux side is ready, ~2-30 s)─
+  // Show "L" (locked/loading) on the matrix while Bridge starts up.
+  {
+    uint8_t fr[8][12] = {};
+    matGlyph(fr, GL_LOCK, 1, 0);
+    ledMatrix.renderBitmap(fr, 8, 12);
+  }
   Bridge.begin();
 
   Serial.println(F("[HVAC] Controller ready"));
@@ -584,5 +741,6 @@ void loop() {
   applyOutputs();
   exposeToBridge();
   handleBridgeCommands();
+  updateLEDMatrix();   // refresh LED matrix diagnostic display
   delay(100);
 }
