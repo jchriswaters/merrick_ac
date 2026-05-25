@@ -16,7 +16,7 @@ Usage
 Workflow
 --------
     1. Connect one sensor, power it on.
-    2. Run this script — it scans 0x01-0xFE and finds the sensor.
+    2. Run this script — it scans 0x01-0x0A and finds the sensor.
     3. Choose the new address (1 = indoor, 2 = outdoor per our design).
     4. Script writes the address and verifies the sensor responds.
     5. Power-cycle the sensor, run test_sensor.py to confirm.
@@ -163,7 +163,7 @@ def main():
     print("Connected.\n")
 
     # ── step 1: scan ─────────────────────────────────────────
-    found = scan_bus(client)
+    found = scan_bus(client, start=1, end=10)
 
     if not found:
         print("No devices found on the bus.")
