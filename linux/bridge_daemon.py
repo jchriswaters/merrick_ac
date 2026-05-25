@@ -1,228 +1,753 @@
 #!/usr/bin/env python3
 """
-bridge_daemon.py
-Uno Q Linux side — HVAC controller bridge daemon
+bridge_daemon.py  —  Uno Q Linux-side HVAC bridge daemon
 
 Responsibilities:
-  1. Poll MCU state every 10 seconds via Arduino Bridge RPC
-  2. Expand compact MCU keys to human-readable field names
-  3. Add derived fields (mode, compressor_on, timestamp)
-  4. Publish full JSON payload to MQTT topic home/hvac/status (retained)
-  5. Subscribe to home/hvac/cmd and relay commands to MCU via Bridge
+  1. Poll MCU relay output + thermostat input states via Arduino Bridge RPC
+  2. Poll all RS485 sensors (2× SHT30 temp/hum, 2× SDM120 energy meters)
+  3. Compute SensorFlags from environmental readings and push to MCU via Bridge
+  4. Assemble full MQTT status payload and publish every 10 s (retained)
+  5. Publish home/hvac/config retained topic on startup and on every change
+  6. Subscribe to home/hvac/cmd and apply configuration changes
 
-See docs/mqtt-payload-spec.md for full payload schema and field reference.
-See docs/system-design.md for Bridge RPC conventions.
+See docs/mqtt-payload-spec.md  — full payload schema and field reference
+See docs/system-design.md §5d  — SensorFlags architecture and Bridge RPC keys
 
-TODO (implement in Claude Code session):
-  [ ] Arduino Bridge RPC calls to read MCU state
-  [ ] Arduino Bridge RPC calls to push config to MCU
-  [ ] MQTT connect with reconnect logic
-  [ ] Config persistence to /etc/hvac/config.json
-  [ ] Systemd service unit file (linux/hvac-bridge.service)
+Dependencies (install on Uno Q Debian Linux):
+  pip3 install paho-mqtt pymodbus==3.6.*
+  bridgeclient is pre-installed as part of the Arduino Bridge package
 
-Dependencies:
-  pip install paho-mqtt arduino-iot-cloud  # or arduino-bridge if available
+Run as a systemd service: see linux/hvac-bridge.service
 """
 
 import json
-import time
 import logging
+import struct
 import threading
+import time
+import collections
 from pathlib import Path
+from typing import Optional
 
 import paho.mqtt.client as mqtt
 
+# Arduino Bridge Python client — pre-installed on Uno Q Debian Linux
+try:
+    from bridgeclient import BridgeClient
+except ImportError:
+    BridgeClient = None  # allows the file to parse on development machines
+
+# pymodbus 3.x (pip3 install pymodbus)
+try:
+    from pymodbus.client import ModbusSerialClient
+    from pymodbus.exceptions import ModbusException
+except ImportError:
+    ModbusSerialClient = None
+    ModbusException = Exception
+
 # ──────────────────────────────────────────────────────────────
-# CONFIGURATION
+# CONSTANTS
 # ──────────────────────────────────────────────────────────────
 
-CONFIG_PATH   = Path("/etc/hvac/config.json")
-MQTT_TOPIC_STATUS = "home/hvac/status"
-MQTT_TOPIC_CMD    = "home/hvac/cmd"
-MQTT_TOPIC_CONFIG = "home/hvac/config"
-POLL_INTERVAL_S   = 10
+CONFIG_PATH    = Path("/etc/hvac/config.json")
+RS485_PORT     = "/dev/ttyUSB0"   # Waveshare USB-RS485 adapter
+RS485_BAUD     = 9600
+RS485_TIMEOUT  = 1.0              # seconds per Modbus request
 
-# Default config — overridden by CONFIG_PATH if it exists
-DEFAULT_CONFIG = {
-    "mqtt_host":           "192.168.1.x",   # UPDATE before deploying
-    "mqtt_port":           1883,
-    "theater_enabled":     False,
-    "vent_minutes_per_hour": 10,
-    "mode_override":       "auto",
+POLL_INTERVAL_S = 10
+
+MQTT_STATUS  = "home/hvac/status"
+MQTT_CONFIG  = "home/hvac/config"
+MQTT_CMD     = "home/hvac/cmd"
+
+# Modbus slave addresses
+ADDR_SHT30_INDOOR  = 0x01   # RS485 SHT30 — indoor, return-air location
+ADDR_SHT30_OUTDOOR = 0x02   # RS485 SHT30 — outdoor, shaded enclosure
+ADDR_SDM120_AC     = 0x03   # Eastron SDM120 — AC system (compressor + air handler)
+ADDR_SDM120_DEHUM  = 0x04   # Eastron SDM120 — dehumidifier circuit
+
+# SDM120 input register base addresses (pairs of 16-bit regs = one IEEE 754 float)
+# Function code 04 (read input registers)
+SDM120_VOLTAGE    = 0x0000
+SDM120_CURRENT    = 0x0006
+SDM120_POWER      = 0x000C
+SDM120_APPARENT   = 0x0012
+SDM120_PF         = 0x001E
+SDM120_FREQ       = 0x0046
+SDM120_ENERGY_IMP = 0x0156
+
+# SHT30 RS485 transmitter register map (common Chinese wall-mount variant)
+# Function code 03 (read holding registers), start = 0x0000, count = 3
+# Register 0: temperature × 10, signed int16, unit = 0.1 °C
+# Register 1: humidity   × 10, unsigned int16, unit = 0.1 %RH
+# Register 2: dew point  × 10, signed int16, unit = 0.1 °C
+# NOTE: Verify against your specific transmitter's datasheet — register maps
+#       vary between manufacturers. Adjust SHT30_START / SHT30_COUNT if needed.
+SHT30_START = 0x0000
+SHT30_COUNT = 3
+
+# SensorFlags: rolling indoor temperature history for tempRisingFast check
+TEMP_HISTORY_MAXLEN  = 120         # 120 samples × 10 s = 20 min of history
+TEMP_RISE_WINDOW_S   = 900.0       # 15-minute evaluation window
+TEMP_RISE_THRESH_F   = 1.0         # indoor must rise ≥ 1 °F in window → "keeping up"
+
+# Bridge RPC key prefixes (must match hvac_controller.ino)
+# MCU writes: "o_*" (relay outputs), "i_*" (thermostat inputs)
+# Linux writes: "sf_*" (SensorFlags), "cfg_*" (Config)
+MCU_OUTPUT_KEYS = {
+    "o_hc": "high_cool",
+    "o_lc": "low_cool",
+    "o_hh": "high_heat",
+    "o_rv": "reversing_valve",
+    "o_fn": "fan_on",
+    "o_td": "theater_damper",
+    "o_dd": "downstairs_damper",
+    "o_vo": "vent_open",
+    "o_dh": "dehumidifier_on",
+}
+MCU_INPUT_KEYS = {
+    "i_mlc": "input_main_low_cool",
+    "i_mhc": "input_main_high_cool",
+    "i_mh":  "input_main_heat",
+    "i_tc":  "input_theater_cool",
+    "i_th":  "input_theater_heat",
+    "i_dc":  "input_downstairs_cool",
+    "i_dh":  "input_downstairs_heat",
+    "i_hh":  "input_high_humidity",
+    "i_vi":  "input_vent_in",
 }
 
 # ──────────────────────────────────────────────────────────────
-# KEY MAP — MCU compact keys → human-readable MQTT field names
-# See docs/mqtt-payload-spec.md for full reference
+# DEFAULT CONFIG  (overridden by CONFIG_PATH when it exists)
 # ──────────────────────────────────────────────────────────────
 
-KEY_MAP = {
-    "hc": "high_cool",          "lc": "low_cool",
-    "hh": "high_heat",          "rv": "reversing_valve",
-    "td": "theater_damper",     "dd": "downstairs_damper",
-    "vo": "vent_open",          "dh": "dehumidifier_on",
-    "it": "indoor_temp_f",      "ih": "indoor_humidity_pct",
-    "id": "indoor_dewpoint_f",
-    "ot": "outdoor_temp_f",     "oh": "outdoor_humidity_pct",
-    "od": "outdoor_dewpoint_f",
-    "av": "ac_voltage_v",       "aa": "ac_current_a",
-    "aw": "ac_power_w",         "ak": "ac_energy_kwh",
-    "af": "ac_frequency_hz",    "ap": "ac_power_factor",
-    "dv": "dehum_voltage_v",    "da": "dehum_current_a",
-    "dw": "dehum_power_w",      "dk": "dehum_energy_kwh",
-    "df": "dehum_frequency_hz", "dp": "dehum_power_factor",
+DEFAULT_CONFIG: dict = {
+    "mqtt_host":              "localhost",   # UPDATE to your broker IP
+    "mqtt_port":              1883,
+    "mqtt_username":          None,          # None = no auth
+    "mqtt_password":          None,
+    "theater_enabled":        False,
+    "vent_minutes_per_hour":  10,
+    "mode_override":          "auto",        # "auto" | "off"
+    "heat_pump_min_temp_f":   40,            # aux heat engages below this °F
+    "free_cool_max_temp_f":   60,            # free-cooling vent opens below this °F
+    "high_humidity_pct":      80,            # vent forced off at or above this %RH
+    "dehum_max_minutes":      20,            # dehumidifier timeout before forced high_cool
 }
 
+# Allowed keys, (min, max, type) — None = no range check
+SETCONFIG_SCHEMA: dict = {
+    "heat_pump_min_temp_f":  (20,   60, int),
+    "free_cool_max_temp_f":  (40,   80, int),
+    "high_humidity_pct":     (50,  100, int),
+    "dehum_max_minutes":     ( 5,  120, int),
+    "vent_minutes_per_hour": ( 0,   60, int),
+    "theater_enabled":       (None, None, bool),
+    "mode_override":         (None, None, str),
+}
+
+log = logging.getLogger("hvac")
 
 # ──────────────────────────────────────────────────────────────
-# HELPERS
+# CONFIG PERSISTENCE
 # ──────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
-    """Load config from disk, falling back to defaults."""
+    """Load config from disk, merging with defaults for any missing keys."""
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            stored = json.load(f)
-        return {**DEFAULT_CONFIG, **stored}
+        try:
+            with open(CONFIG_PATH) as fh:
+                stored = json.load(fh)
+            return {**DEFAULT_CONFIG, **stored}
+        except Exception as exc:
+            log.error("Failed to load config from %s: %s — using defaults", CONFIG_PATH, exc)
     return DEFAULT_CONFIG.copy()
 
 
 def save_config(cfg: dict) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
+    """Persist config to disk atomically."""
+    try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+        tmp.replace(CONFIG_PATH)
+    except Exception as exc:
+        log.error("Failed to save config: %s", exc)
+
+# ──────────────────────────────────────────────────────────────
+# RS485 MODBUS — SHT30 TEMPERATURE / HUMIDITY SENSORS
+# ──────────────────────────────────────────────────────────────
+
+def _raw_to_signed(val: int) -> int:
+    """Convert unsigned 16-bit Modbus register value to signed int16."""
+    return val - 65536 if val > 32767 else val
 
 
-def derive_mode(payload: dict) -> str:
-    if payload.get("high_heat"):    return "heat"
-    if payload.get("high_cool"):    return "high_cool"
-    if payload.get("low_cool"):     return "low_cool"
+def read_sht30(modbus: "ModbusSerialClient", addr: int, label: str) -> Optional[dict]:
+    """
+    Read temperature, humidity, and dew point from one SHT30 RS485 transmitter.
+
+    Returns a dict with keys ending in _temp_f, _humidity_pct, _dewpoint_f,
+    or None if the read fails. The label ("indoor" | "outdoor") is used as
+    a key prefix so the caller can merge results into the status payload.
+    """
+    try:
+        resp = modbus.read_holding_registers(
+            address=SHT30_START, count=SHT30_COUNT, slave=addr
+        )
+        if resp.isError():
+            log.warning("SHT30 addr=0x%02X (%s) read error", addr, label)
+            return None
+
+        temp_c = _raw_to_signed(resp.registers[0]) / 10.0
+        hum    = resp.registers[1] / 10.0
+        dew_c  = _raw_to_signed(resp.registers[2]) / 10.0 if SHT30_COUNT >= 3 else None
+
+        temp_f = temp_c * 9.0 / 5.0 + 32.0
+        dew_f  = dew_c  * 9.0 / 5.0 + 32.0 if dew_c is not None else None
+
+        result = {
+            f"{label}_temp_f":     round(temp_f, 1),
+            f"{label}_humidity_pct": round(hum, 1),
+        }
+        if dew_f is not None:
+            result[f"{label}_dewpoint_f"] = round(dew_f, 1)
+        return result
+
+    except ModbusException as exc:
+        log.warning("SHT30 addr=0x%02X (%s) exception: %s", addr, label, exc)
+        return None
+
+# ──────────────────────────────────────────────────────────────
+# RS485 MODBUS — SDM120 ENERGY METERS
+# ──────────────────────────────────────────────────────────────
+
+def _read_sdm120_float(modbus: "ModbusSerialClient", addr: int, reg: int) -> Optional[float]:
+    """Read one IEEE 754 float from two consecutive SDM120 input registers."""
+    try:
+        resp = modbus.read_input_registers(address=reg, count=2, slave=addr)
+        if resp.isError():
+            return None
+        packed = struct.pack(">HH", resp.registers[0], resp.registers[1])
+        return struct.unpack(">f", packed)[0]
+    except (ModbusException, struct.error):
+        return None
+
+
+def read_sdm120(modbus: "ModbusSerialClient", addr: int, prefix: str) -> Optional[dict]:
+    """
+    Read voltage, current, power, apparent power, power factor, frequency,
+    and import energy from one Eastron SDM120 Modbus energy meter.
+
+    prefix is "ac" or "dehum" — used as field name prefix in the MQTT payload.
+    Returns a dict or None if all reads fail.
+    """
+    reads = {
+        SDM120_VOLTAGE:    (f"{prefix}_voltage_v",    1),
+        SDM120_CURRENT:    (f"{prefix}_current_a",    2),
+        SDM120_POWER:      (f"{prefix}_power_w",      0),
+        SDM120_APPARENT:   (f"{prefix}_apparent_va",  0),
+        SDM120_PF:         (f"{prefix}_power_factor", 2),
+        SDM120_FREQ:       (f"{prefix}_frequency_hz", 1),
+        SDM120_ENERGY_IMP: (f"{prefix}_energy_kwh",   3),
+    }
+    result = {}
+    for reg, (field, decimals) in reads.items():
+        val = _read_sdm120_float(modbus, addr, reg)
+        if val is not None:
+            result[field] = round(val, decimals)
+
+    if not result:
+        log.warning("SDM120 addr=0x%02X (%s) — all reads failed", addr, prefix)
+        return None
+    return result
+
+
+def reset_sdm120_energy(modbus: "ModbusSerialClient", addr: int) -> bool:
+    """
+    Reset the SDM120 energy accumulator for the given meter address.
+
+    NOTE: The SDM120 does not support a Modbus energy-reset command on all
+    firmware versions. If this fails, the meter must be reset via the front-panel
+    button sequence (hold SET until 'rSt' appears). Returns True on success.
+    """
+    try:
+        # Write 0x0003 to holding register 0xF010 — SDM120 reset command
+        resp = modbus.write_register(address=0xF010, value=0x0003, slave=addr)
+        if resp.isError():
+            log.warning("SDM120 energy reset: Modbus error for addr=0x%02X", addr)
+            return False
+        log.info("SDM120 energy reset sent to addr=0x%02X", addr)
+        return True
+    except ModbusException as exc:
+        log.warning("SDM120 energy reset exception (addr=0x%02X): %s — use front-panel reset", addr, exc)
+        return False
+
+# ──────────────────────────────────────────────────────────────
+# SENSOR FLAGS COMPUTATION
+# ──────────────────────────────────────────────────────────────
+
+# Rolling indoor temperature history: deque of (timestamp_s, temp_f) tuples
+# Oldest entries at the left; newest at the right.
+_temp_history: collections.deque = collections.deque(maxlen=TEMP_HISTORY_MAXLEN)
+
+
+def _update_temp_history(indoor_temp_f: float) -> None:
+    _temp_history.append((time.time(), indoor_temp_f))
+
+
+def _compute_temp_rising_fast(current_temp_f: float) -> bool:
+    """
+    Return True if the indoor temperature has risen >= TEMP_RISE_THRESH_F in
+    the last TEMP_RISE_WINDOW_S seconds.
+
+    Defaults to True when there is insufficient history — this keeps the heat
+    pump on its low stage until 15 minutes of data is available.
+    """
+    if len(_temp_history) < 3:
+        return True   # not enough data yet — default: assume keeping up
+
+    window_start = time.time() - TEMP_RISE_WINDOW_S
+    # Find the oldest sample still within the evaluation window
+    oldest_in_window = None
+    for ts, temp in _temp_history:          # iterates oldest → newest (left → right)
+        if ts >= window_start:
+            oldest_in_window = (ts, temp)
+            break
+
+    if oldest_in_window is None:
+        # All history is older than the window — use the most recent entry
+        oldest_in_window = _temp_history[-1]
+
+    delta = current_temp_f - oldest_in_window[1]
+    return delta >= TEMP_RISE_THRESH_F
+
+
+def compute_sensor_flags(
+    outdoor_temp_f:      Optional[float],
+    outdoor_humidity_pct: Optional[float],
+    indoor_temp_f:       Optional[float],
+    cfg:                 dict,
+) -> dict:
+    """
+    Evaluate environmental thresholds and return a dict of SensorFlag booleans
+    ready to push to the MCU via Bridge.
+
+    Returns cautious defaults if sensor readings are unavailable.
+    """
+    heat_min  = cfg["heat_pump_min_temp_f"]
+    cool_max  = cfg["free_cool_max_temp_f"]
+    hum_limit = cfg["high_humidity_pct"]
+
+    # Default to safe values when sensor data is absent
+    if outdoor_temp_f is not None:
+        heat_pump_ok    = outdoor_temp_f >= heat_min
+        aux_heat_needed = outdoor_temp_f < heat_min
+        vent_temp_ok    = outdoor_temp_f < cool_max
+    else:
+        log.warning("Outdoor temp unavailable — defaulting heatPumpOk=True, ventTempOk=False")
+        heat_pump_ok    = True
+        aux_heat_needed = False
+        vent_temp_ok    = False
+
+    if outdoor_humidity_pct is not None:
+        vent_blocked = outdoor_humidity_pct >= hum_limit
+        vent_hum_ok  = outdoor_humidity_pct < hum_limit
+    else:
+        log.warning("Outdoor humidity unavailable — defaulting ventBlocked=True")
+        vent_blocked = True
+        vent_hum_ok  = False
+
+    if indoor_temp_f is not None:
+        _update_temp_history(indoor_temp_f)
+        temp_rising_fast = _compute_temp_rising_fast(indoor_temp_f)
+    else:
+        log.warning("Indoor temp unavailable — defaulting tempRisingFast=True")
+        temp_rising_fast = True   # safe default: stay on low stage
+
+    return {
+        "heatPumpOk":    heat_pump_ok,
+        "auxHeatNeeded": aux_heat_needed,
+        "tempRisingFast": temp_rising_fast,
+        "ventOk":        vent_temp_ok and vent_hum_ok,
+        "ventBlocked":   vent_blocked,
+    }
+
+# ──────────────────────────────────────────────────────────────
+# ARDUINO BRIDGE — MCU STATE READ AND CONFIG/FLAGS PUSH
+# ──────────────────────────────────────────────────────────────
+
+def _bridge_get_bool(bridge: "BridgeClient", key: str) -> Optional[bool]:
+    """Read a single '0'/'1' key from Bridge. Returns None if key absent."""
+    val = bridge.get(key)
+    if val is None:
+        return None
+    # BridgeClient may return bytes or str depending on version
+    s = val.decode() if isinstance(val, (bytes, bytearray)) else str(val)
+    return s.strip() == "1"
+
+
+def read_mcu_state(bridge: "BridgeClient") -> dict:
+    """
+    Read all relay output and thermostat input states from the MCU via Bridge.
+
+    Returns a dict with human-readable field names (booleans).
+    Missing keys are omitted so the MQTT payload consumer can detect stale data.
+    """
+    result = {}
+    for mcu_key, field_name in {**MCU_OUTPUT_KEYS, **MCU_INPUT_KEYS}.items():
+        val = _bridge_get_bool(bridge, mcu_key)
+        if val is not None:
+            result[field_name] = val
+    return result
+
+
+def push_sensor_flags_to_mcu(bridge: "BridgeClient", flags: dict) -> None:
+    """
+    Push pre-computed SensorFlags to the MCU Bridge data store.
+    Bridge key names must match handleBridgeCommands() in hvac_controller.ino.
+    """
+    mapping = {
+        "heatPumpOk":    "sf_hpo",
+        "auxHeatNeeded": "sf_ahn",
+        "tempRisingFast": "sf_trf",
+        "ventOk":        "sf_vok",
+        "ventBlocked":   "sf_vbl",
+    }
+    for flag_name, bridge_key in mapping.items():
+        val = "1" if flags.get(flag_name, False) else "0"
+        bridge.put(bridge_key, val)
+
+
+def push_config_to_mcu(bridge: "BridgeClient", cfg: dict) -> None:
+    """
+    Push all MCU-relevant config fields to the Bridge data store.
+    Bridge key names must match handleBridgeCommands() in hvac_controller.ino.
+    """
+    bridge.put("cfg_th",  "1" if cfg.get("theater_enabled", False) else "0")
+    bridge.put("cfg_vph", str(int(cfg.get("vent_minutes_per_hour", 10))))
+    bridge.put("cfg_mo",  "1" if cfg.get("mode_override", "auto") == "off" else "0")
+    bridge.put("cfg_dmm", str(int(cfg.get("dehum_max_minutes", 20))))
+
+# ──────────────────────────────────────────────────────────────
+# PAYLOAD ASSEMBLY
+# ──────────────────────────────────────────────────────────────
+
+def derive_mode(s: dict) -> str:
+    """
+    Derive a human-readable operating mode string from relay output states.
+    The reversing valve distinguishes heat-pump heating from compressor cooling.
+    """
+    rv = s.get("reversing_valve", False)
+    hc = s.get("high_cool",       False)
+    lc = s.get("low_cool",        False)
+    fn = s.get("fan_on",          False)
+    dh = s.get("dehumidifier_on", False)
+
+    if (hc or lc) and rv:  return "heat"       # heat pump: revValve energised
+    if hc:                 return "high_cool"
+    if lc:                 return "low_cool"
+    if dh:                 return "dehum"
+    if fn:                 return "fan"
     return "off"
 
 
-def expand_keys(compact: dict) -> dict:
-    """Expand MCU short keys to full MQTT field names."""
-    return {KEY_MAP.get(k, k): v for k, v in compact.items()}
-
-
-# ──────────────────────────────────────────────────────────────
-# MCU BRIDGE (TODO: implement with Arduino Bridge RPC)
-# ──────────────────────────────────────────────────────────────
-
-def read_mcu_state() -> dict | None:
-    """
-    Poll current state from MCU via Arduino Bridge RPC.
-    Returns expanded dict or None on failure.
-
-    TODO: Replace stub with actual Bridge.get() or equivalent RPC call.
-    The MCU exposes state as a compact JSON string via Bridge key "hvac_state".
-    """
-    # STUB — replace with:
-    # from arduino import Bridge
-    # raw = Bridge.get("hvac_state")
-    # return expand_keys(json.loads(raw)) if raw else None
-    logging.warning("read_mcu_state: Bridge RPC not yet implemented")
-    return None
-
-
-def push_config_to_mcu(cfg: dict) -> None:
-    """
-    Push configuration to MCU via Arduino Bridge RPC.
-
-    TODO: Replace stub with Bridge.put() calls for each config key.
-    """
-    logging.warning("push_config_to_mcu: Bridge RPC not yet implemented")
-
+def build_config_payload(cfg: dict) -> dict:
+    """Build the home/hvac/config MQTT payload from the current config dict."""
+    return {
+        "theater_enabled":        cfg.get("theater_enabled", False),
+        "vent_minutes_per_hour":  cfg.get("vent_minutes_per_hour", 10),
+        "mode_override":          cfg.get("mode_override", "auto"),
+        "heat_pump_min_temp_f":   cfg.get("heat_pump_min_temp_f", 40),
+        "free_cool_max_temp_f":   cfg.get("free_cool_max_temp_f", 60),
+        "high_humidity_pct":      cfg.get("high_humidity_pct", 80),
+        "dehum_max_minutes":      cfg.get("dehum_max_minutes", 20),
+        "config_updated_at":      int(time.time()),
+    }
 
 # ──────────────────────────────────────────────────────────────
 # MQTT COMMAND HANDLER
 # ──────────────────────────────────────────────────────────────
 
-def handle_command(cfg: dict, payload_str: str) -> dict:
+def validate_setconfig(key: str, value) -> Optional[object]:
     """
-    Parse a command from home/hvac/cmd and apply it.
-    Returns updated config dict.
+    Validate a setConfig key/value pair against SETCONFIG_SCHEMA.
+    Returns the coerced value, or None if validation fails (logs the reason).
+    """
+    if key not in SETCONFIG_SCHEMA:
+        log.warning("setConfig: unknown key '%s'", key)
+        return None
+
+    lo, hi, typ = SETCONFIG_SCHEMA[key]
+
+    # mode_override: only "auto" or "off" accepted
+    if key == "mode_override":
+        if value not in ("auto", "off"):
+            log.warning("setConfig: mode_override must be 'auto' or 'off', got '%s'", value)
+            return None
+        return value
+
+    # boolean keys
+    if typ is bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, str)):
+            return bool(value)
+        log.warning("setConfig: expected bool for '%s', got %r", key, value)
+        return None
+
+    # integer keys with range check
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        log.warning("setConfig: expected int for '%s', got %r", key, value)
+        return None
+    if lo is not None and coerced < lo:
+        log.warning("setConfig: '%s' value %d below minimum %d", key, coerced, lo)
+        return None
+    if hi is not None and coerced > hi:
+        log.warning("setConfig: '%s' value %d above maximum %d", key, coerced, hi)
+        return None
+    return coerced
+
+
+def handle_command(cfg: dict, bridge: Optional["BridgeClient"],
+                   mqtt_client: mqtt.Client, payload_str: str) -> dict:
+    """
+    Parse a home/hvac/cmd message, apply changes, persist config, push to MCU,
+    and republish home/hvac/config. Returns the (possibly updated) config dict.
     """
     try:
         cmd = json.loads(payload_str)
-    except json.JSONDecodeError:
-        logging.error("Invalid command JSON: %s", payload_str)
+    except json.JSONDecodeError as exc:
+        log.error("Invalid command JSON: %s — %s", payload_str[:120], exc)
         return cfg
 
     name = cmd.get("cmd")
+    changed = False
 
-    if name == "theater":
-        cfg["theater_enabled"] = bool(cmd.get("enabled", False))
-        push_config_to_mcu(cfg)
-
-    elif name == "vent":
-        minutes = int(cmd.get("minutesPerHour", 10))
-        cfg["vent_minutes_per_hour"] = max(0, min(60, minutes))
-        push_config_to_mcu(cfg)
-
-    elif name == "mode_override":
-        cfg["mode_override"] = cmd.get("mode", "auto")
-        push_config_to_mcu(cfg)
+    if name == "setConfig":
+        key = cmd.get("key")
+        raw_value = cmd.get("value")
+        if key is None or raw_value is None:
+            log.warning("setConfig: missing 'key' or 'value'")
+            return cfg
+        coerced = validate_setconfig(key, raw_value)
+        if coerced is not None:
+            cfg[key] = coerced
+            changed = True
+            log.info("setConfig: %s = %r", key, coerced)
 
     elif name == "reset_energy":
-        # TODO: send PZEM energy reset command via MCU Bridge
-        logging.info("Energy reset requested for circuit: %s", cmd.get("circuit"))
+        circuit = cmd.get("circuit", "all").lower()
+        log.info("reset_energy requested for circuit: %s (Modbus reset may not be supported — use SDM120 front panel if this fails)", circuit)
+        # Actual Modbus reset attempted in the main polling loop via reset_sdm120_energy()
+        # Stash the request in config so the main loop sees it on the next cycle
+        cfg["_pending_energy_reset"] = circuit
+        changed = False   # don't republish config for this
 
     else:
-        logging.warning("Unknown command: %s", name)
+        log.warning("Unknown command: %s", name)
+        return cfg
 
-    save_config(cfg)
+    if changed:
+        save_config(cfg)
+        if bridge:
+            push_config_to_mcu(bridge, cfg)
+        config_payload = build_config_payload(cfg)
+        mqtt_client.publish(MQTT_CONFIG, json.dumps(config_payload), retain=True, qos=1)
+        log.info("Config updated and republished")
+
     return cfg
 
-
 # ──────────────────────────────────────────────────────────────
-# MAIN LOOP
+# MAIN RUN LOOP
 # ──────────────────────────────────────────────────────────────
 
-def run():
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(levelname)s %(message)s")
+def run() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     cfg = load_config()
+    cfg_lock = threading.Lock()   # protects cfg in on_message callback
 
-    client = mqtt.Client()
-    # TODO: add client.username_pw_set() if broker requires auth
+    # ── Arduino Bridge client ──────────────────────────────────
+    bridge: Optional[BridgeClient] = None
+    if BridgeClient is not None:
+        try:
+            bridge = BridgeClient()
+            log.info("Arduino Bridge client connected")
+        except Exception as exc:
+            log.error("Bridge client failed to initialise: %s", exc)
+    else:
+        log.warning("bridgeclient not available — MCU Bridge reads/writes disabled")
 
-    def on_connect(c, userdata, flags, rc):
-        logging.info("MQTT connected (rc=%d)", rc)
-        c.subscribe(MQTT_TOPIC_CMD, qos=1)
+    # ── RS485 Modbus client ────────────────────────────────────
+    modbus: Optional[ModbusSerialClient] = None
+    if ModbusSerialClient is not None:
+        modbus = ModbusSerialClient(
+            port=RS485_PORT,
+            baudrate=RS485_BAUD,
+            stopbits=1,
+            bytesize=8,
+            parity="N",
+            timeout=RS485_TIMEOUT,
+        )
+        if modbus.connect():
+            log.info("RS485 Modbus connected on %s @ %d baud", RS485_PORT, RS485_BAUD)
+        else:
+            log.error("RS485 Modbus failed to connect on %s", RS485_PORT)
+            modbus = None
+    else:
+        log.warning("pymodbus not available — RS485 sensor reads disabled")
 
-    def on_message(c, userdata, msg):
+    # ── MQTT client ────────────────────────────────────────────
+    mqtt_client = mqtt.Client(client_id="hvac-bridge", clean_session=True)
+    mqtt_client.reconnect_delay_set(min_delay=2, max_delay=60)
+
+    if cfg.get("mqtt_username"):
+        mqtt_client.username_pw_set(cfg["mqtt_username"], cfg.get("mqtt_password"))
+
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            log.info("MQTT connected to %s:%d", cfg["mqtt_host"], cfg["mqtt_port"])
+            client.subscribe(MQTT_CMD, qos=1)
+            # Publish current config immediately so HMI and HA have it on reconnect
+            with cfg_lock:
+                client.publish(MQTT_CONFIG, json.dumps(build_config_payload(cfg)),
+                               retain=True, qos=1)
+        else:
+            log.warning("MQTT connect failed (rc=%d)", rc)
+
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            log.warning("MQTT unexpectedly disconnected (rc=%d) — will reconnect", rc)
+
+    def on_message(client, userdata, msg):
         nonlocal cfg
-        logging.info("CMD received: %s", msg.payload.decode())
-        cfg = handle_command(cfg, msg.payload.decode())
-        # Publish updated config state
-        config_payload = {
-            "theater_enabled":       cfg["theater_enabled"],
-            "vent_minutes_per_hour": cfg["vent_minutes_per_hour"],
-            "mode_override":         cfg["mode_override"],
-            "config_updated_at":     int(time.time()),
-        }
-        c.publish(MQTT_TOPIC_CONFIG, json.dumps(config_payload), retain=True)
+        payload_str = msg.payload.decode(errors="replace")
+        log.info("CMD  ← %s", payload_str[:200])
+        with cfg_lock:
+            cfg = handle_command(cfg, bridge, client, payload_str)
 
-    client.on_connect = on_connect
-    client.on_message = on_message
-    client.connect(cfg["mqtt_host"], cfg["mqtt_port"], keepalive=60)
-    client.loop_start()
+    mqtt_client.on_connect    = on_connect
+    mqtt_client.on_disconnect = on_disconnect
+    mqtt_client.on_message    = on_message
+
+    try:
+        mqtt_client.connect(cfg["mqtt_host"], int(cfg["mqtt_port"]), keepalive=60)
+    except Exception as exc:
+        log.error("Initial MQTT connect failed: %s — will retry in background", exc)
+
+    mqtt_client.loop_start()   # handles reconnection automatically in a background thread
+
+    # Push initial config to MCU before entering the polling loop
+    if bridge:
+        with cfg_lock:
+            push_config_to_mcu(bridge, cfg)
+
+    log.info("Entering polling loop (interval=%d s)", POLL_INTERVAL_S)
 
     while True:
-        state = read_mcu_state()
-        if state:
-            state["timestamp"]     = int(time.time())
-            state["mode"]          = derive_mode(state)
-            state["compressor_on"] = state.get("ac_current_a", 0) > 5.0
-            client.publish(MQTT_TOPIC_STATUS, json.dumps(state), retain=True)
-            logging.info("Published status: mode=%s", state["mode"])
+        loop_start = time.monotonic()
+
+        # ── Snapshot config under lock ─────────────────────────
+        with cfg_lock:
+            cfg_snap = cfg.copy()
+            pending_reset = cfg_snap.pop("_pending_energy_reset", None)
+            if pending_reset:
+                cfg.pop("_pending_energy_reset", None)
+
+        payload: dict = {}
+
+        # ── Handle pending energy reset ────────────────────────
+        if pending_reset and modbus:
+            circuits = (
+                [(ADDR_SDM120_AC, "ac"), (ADDR_SDM120_DEHUM, "dehum")]
+                if pending_reset == "all"
+                else [(ADDR_SDM120_AC, "ac") if pending_reset == "ac"
+                      else (ADDR_SDM120_DEHUM, "dehum")]
+            )
+            for addr, label in circuits:
+                reset_sdm120_energy(modbus, addr)
+
+        # ── Read MCU relay outputs + thermostat inputs ─────────
+        if bridge:
+            mcu_state = read_mcu_state(bridge)
+            if mcu_state:
+                payload.update(mcu_state)
+            else:
+                log.warning("MCU Bridge read returned no data")
         else:
-            logging.warning("MCU state read failed — skipping publish")
+            log.debug("Bridge unavailable — skipping MCU state read")
 
-        time.sleep(POLL_INTERVAL_S)
+        # ── Read RS485 sensors ─────────────────────────────────
+        indoor_temp_f       = None
+        outdoor_temp_f      = None
+        outdoor_humidity    = None
 
+        if modbus:
+            indoor = read_sht30(modbus, ADDR_SHT30_INDOOR, "indoor")
+            if indoor:
+                payload.update(indoor)
+                indoor_temp_f = indoor.get("indoor_temp_f")
+
+            outdoor = read_sht30(modbus, ADDR_SHT30_OUTDOOR, "outdoor")
+            if outdoor:
+                payload.update(outdoor)
+                outdoor_temp_f   = outdoor.get("outdoor_temp_f")
+                outdoor_humidity = outdoor.get("outdoor_humidity_pct")
+
+            ac_power = read_sdm120(modbus, ADDR_SDM120_AC, "ac")
+            if ac_power:
+                payload.update(ac_power)
+
+            dehum_power = read_sdm120(modbus, ADDR_SDM120_DEHUM, "dehum")
+            if dehum_power:
+                payload.update(dehum_power)
+
+        # ── Compute and push SensorFlags to MCU ───────────────
+        flags = compute_sensor_flags(
+            outdoor_temp_f=outdoor_temp_f,
+            outdoor_humidity_pct=outdoor_humidity,
+            indoor_temp_f=indoor_temp_f,
+            cfg=cfg_snap,
+        )
+        if bridge:
+            push_sensor_flags_to_mcu(bridge, flags)
+
+        # ── Derive compound fields ─────────────────────────────
+        payload["mode"]         = derive_mode(payload)
+        payload["compressor_on"] = payload.get("ac_current_a", 0.0) > 5.0
+        payload["timestamp"]    = int(time.time())
+
+        # ── Publish MQTT status (retained) ─────────────────────
+        try:
+            mqtt_client.publish(MQTT_STATUS, json.dumps(payload), retain=True, qos=0)
+            log.info("Status → mode=%-10s  indoor=%-5s°F  outdoor=%-5s°F  hum=%-4s%%",
+                     payload["mode"],
+                     f"{indoor_temp_f:.1f}"  if indoor_temp_f   is not None else "?",
+                     f"{outdoor_temp_f:.1f}" if outdoor_temp_f  is not None else "?",
+                     f"{outdoor_humidity:.0f}" if outdoor_humidity is not None else "?")
+        except Exception as exc:
+            log.error("MQTT publish failed: %s", exc)
+
+        # ── Sleep for the remainder of the poll interval ───────
+        elapsed = time.monotonic() - loop_start
+        sleep_s = max(0.1, POLL_INTERVAL_S - elapsed)
+        time.sleep(sleep_s)
+
+
+# ──────────────────────────────────────────────────────────────
+# ENTRY POINT
+# ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    run()
+    try:
+        run()
+    except KeyboardInterrupt:
+        log.info("Shutdown requested")
