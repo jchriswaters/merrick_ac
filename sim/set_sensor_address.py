@@ -34,6 +34,9 @@ and you can supply a custom register number.
 
 import sys
 import time
+import logging
+
+logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
 
 try:
     from pymodbus.client import ModbusSerialClient
