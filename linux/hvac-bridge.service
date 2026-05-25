@@ -1,16 +1,15 @@
 [Unit]
 Description=HVAC Bridge Daemon (RS485 polling, SensorFlags, MQTT, Bridge RPC)
-Documentation=file:///home/user/hvac-controller/docs/system-design.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/home/user/hvac-controller/linux
+User=arduino
+WorkingDirectory=/home/arduino/hvac-controller/linux
 
 # Full path to the daemon script — adjust if repo is cloned elsewhere
-ExecStart=/usr/bin/python3 /home/user/hvac-controller/linux/bridge_daemon.py
+ExecStart=/usr/bin/python3 /home/arduino/hvac-controller/linux/bridge_daemon.py
 
 # Restart policy: always restart, 10-second delay, giving MQTT/RS485 time to recover
 Restart=always
