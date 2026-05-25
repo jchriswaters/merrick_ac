@@ -1,0 +1,24 @@
+[Unit]
+Description=HVAC Web UI and REST API (Flask)
+Documentation=file:///home/user/hvac-controller/docs/system-design.md
+After=network-online.target hvac-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/user/hvac-controller/linux
+
+# Full path to the web app — adjust if repo is cloned elsewhere
+ExecStart=/usr/bin/python3 /home/user/hvac-controller/linux/web_config.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hvac-web
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

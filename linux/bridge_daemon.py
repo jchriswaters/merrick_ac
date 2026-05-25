@@ -725,6 +725,15 @@ def run() -> None:
         payload["compressor_on"] = payload.get("ac_current_a", 0.0) > 5.0
         payload["timestamp"]    = int(time.time())
 
+        # ── Write status cache for web_config.py ───────────────
+        # web_config.py reads /tmp/hvac_status.json for the /api/status endpoint
+        try:
+            _tmp = Path("/tmp/hvac_status.json.tmp")
+            _tmp.write_text(json.dumps(payload))
+            _tmp.replace(Path("/tmp/hvac_status.json"))
+        except Exception as exc:
+            log.debug("Status cache write failed: %s", exc)
+
         # ── Publish MQTT status (retained) ─────────────────────
         try:
             mqtt_client.publish(MQTT_STATUS, json.dumps(payload), retain=True, qos=0)

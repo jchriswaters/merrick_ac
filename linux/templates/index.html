@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>HVAC Controller</title>
+
+  <!-- PWA: enables "Add to Home Screen" on iPhone Safari -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="HVAC">
+  <meta name="theme-color" content="#0f3460">
+  <link rel="manifest" href="/manifest.json">
+
+  <style>
+    /* ── Reset + base ────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #1a1a2e;
+      --panel:     #16213e;
+      --border:    #0f3460;
+      --accent:    #e94560;
+      --green:     #27ae60;
+      --yellow:    #f39c12;
+      --red:       #e74c3c;
+      --blue:      #2980b9;
+      --text:      #eaeaea;
+      --muted:     #8892a4;
+      --radius:    10px;
+      --font:      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    /* ── Header ──────────────────────────────────────────────── */
+    header {
+      background: var(--border);
+      padding: 14px 16px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: .04em; }
+    #conn-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted); transition: background .4s;
+    }
+    #conn-dot.ok  { background: var(--green); }
+    #conn-dot.err { background: var(--red);   }
+
+    /* ── Tab bar ─────────────────────────────────────────────── */
+    nav {
+      display: flex;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    nav button {
+      flex: 1;
+      min-width: 70px;
+      padding: 11px 6px;
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      color: var(--muted);
+      font-size: .82rem;
+      font-weight: 500;
+      cursor: pointer;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    nav button.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+
+    /* ── Tabs ────────────────────────────────────────────────── */
+    .tab { display: none; padding: 16px; }
+    .tab.active { display: block; }
+
+    /* ── Cards ───────────────────────────────────────────────── */
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    .card-title {
+      font-size: .72rem;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    /* ── Mode badge ──────────────────────────────────────────── */
+    #mode-badge {
+      display: inline-block;
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: .05em;
+      padding: 6px 18px;
+      border-radius: 8px;
+      background: var(--border);
+      margin-bottom: 8px;
+    }
+    #mode-badge.heat      { background: #7d2020; color: #ffcdd2; }
+    #mode-badge.high_cool { background: #0d3b6e; color: #bbdefb; }
+    #mode-badge.low_cool  { background: #0d4f4f; color: #b2dfdb; }
+    #mode-badge.dehum     { background: #4a2060; color: #e1bee7; }
+    #mode-badge.fan       { background: #1b3a1b; color: #c8e6c9; }
+    #mode-badge.off       { background: #333;    color: var(--muted); }
+
+    /* ── Sensor grid ─────────────────────────────────────────── */
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .sensor-val { font-size: 1.3rem; font-weight: 600; }
+    .sensor-lbl { font-size: .72rem; color: var(--muted); margin-top: 2px; }
+
+    /* ── Relay chips ─────────────────────────────────────────── */
+    .relay-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .chip {
+      padding: 5px 11px;
+      border-radius: 20px;
+      font-size: .78rem;
+      font-weight: 600;
+      background: #333;
+      color: var(--muted);
+      border: 1px solid #444;
+      letter-spacing: .03em;
+    }
+    .chip.on  { background: #163d1e; color: #69f0ae; border-color: #27ae60; }
+    .chip.err { background: #3d1616; color: #ff8a80; border-color: var(--red); }
+
+    /* ── Power row ───────────────────────────────────────────── */
+    .power-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: .88rem;
+      padding: 4px 0;
+      border-bottom: 1px solid #2a2a40;
+    }
+    .power-row:last-child { border-bottom: none; }
+    .power-val { font-weight: 600; }
+
+    /* ── Setpoint rows ───────────────────────────────────────── */
+    .setpoint-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid #2a2a40;
+      gap: 12px;
+    }
+    .setpoint-row:last-child { border-bottom: none; }
+    .setpoint-lbl { font-size: .9rem; flex: 1; }
+    .setpoint-unit { font-size: .78rem; color: var(--muted); width: 28px; }
+    .setpoint-input {
+      width: 72px;
+      padding: 6px 8px;
+      background: #2a2a40;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: .95rem;
+      text-align: center;
+    }
+    .setpoint-input:focus { outline: none; border-color: var(--accent); }
+    .btn-set {
+      padding: 6px 14px;
+      background: var(--border);
+      border: none;
+      border-radius: 6px;
+      color: var(--text);
+      font-size: .82rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn-set:active { background: var(--accent); }
+    .btn-set.saved  { background: var(--green);  }
+
+    /* ── Toggle ──────────────────────────────────────────────── */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid #2a2a40;
+    }
+    .toggle-row:last-child { border-bottom: none; }
+    .toggle-lbl { font-size: .9rem; }
+    .toggle {
+      position: relative;
+      width: 46px; height: 26px;
+    }
+    .toggle input { display: none; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: #333;
+      border-radius: 13px;
+      cursor: pointer;
+      transition: background .25s;
+    }
+    .slider::after {
+      content: "";
+      position: absolute;
+      width: 20px; height: 20px;
+      top: 3px; left: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform .25s;
+    }
+    .toggle input:checked + .slider { background: var(--green); }
+    .toggle input:checked + .slider::after { transform: translateX(20px); }
+
+    /* ── Override buttons ─────────────────────────────────────── */
+    .btn-group { display: flex; gap: 10px; }
+    .btn-mode {
+      flex: 1;
+      padding: 12px;
+      border: 2px solid var(--border);
+      border-radius: 8px;
+      background: none;
+      color: var(--muted);
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-mode.active-auto { border-color: var(--green); color: var(--green); }
+    .btn-mode.active-off  { border-color: var(--red);   color: var(--red);   }
+
+    /* ── I/O grid ─────────────────────────────────────────────── */
+    .io-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .io-cell {
+      background: #2a2a40;
+      border: 1px solid #444;
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .io-cell.active { border-color: var(--green); background: #163d1e; }
+    .io-label { font-size: .72rem; color: var(--muted); margin-bottom: 4px; }
+    .io-state { font-size: .88rem; font-weight: 700; color: var(--muted); }
+    .io-cell.active .io-state { color: #69f0ae; }
+
+    /* ── Timestamp ────────────────────────────────────────────── */
+    .ts { font-size: .72rem; color: var(--muted); text-align: right; margin-top: 10px; }
+
+    /* ── Error banner ─────────────────────────────────────────── */
+    #error-banner {
+      display: none;
+      background: #5a1a1a;
+      color: #ffcdd2;
+      font-size: .84rem;
+      padding: 8px 16px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>HVAC Controller</h1>
+  <div id="conn-dot" title="Data connection status"></div>
+</header>
+
+<div id="error-banner"></div>
+
+<nav>
+  <button class="active" onclick="showTab('status')">Status</button>
+  <button onclick="showTab('setpoints')">Setpoints</button>
+  <button onclick="showTab('zones')">Zones</button>
+  <button onclick="showTab('io')">I/O</button>
+</nav>
+
+<!-- ═══════════════════════════════════════════════════════════
+     STATUS TAB
+═══════════════════════════════════════════════════════════ -->
+<div id="tab-status" class="tab active">
+
+  <div class="card">
+    <div class="card-title">Operating Mode</div>
+    <div id="mode-badge" class="off">—</div>
+    <div style="font-size:.84rem; color:var(--muted);">
+      Compressor: <span id="comp-state">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Environment</div>
+    <div class="sensor-grid">
+      <div>
+        <div class="sensor-val" id="indoor-temp">—</div>
+        <div class="sensor-lbl">Indoor temp</div>
+      </div>
+      <div>
+        <div class="sensor-val" id="indoor-hum">—</div>
+        <div class="sensor-lbl">Indoor humidity</div>
+      </div>
+      <div>
+        <div class="sensor-val" id="outdoor-temp">—</div>
+        <div class="sensor-lbl">Outdoor temp</div>
+      </div>
+      <div>
+        <div class="sensor-val" id="outdoor-hum">—</div>
+        <div class="sensor-lbl">Outdoor humidity</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Active Outputs</div>
+    <div class="relay-grid" id="relay-chips"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">AC System Power</div>
+    <div id="ac-power-rows"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Dehumidifier Power</div>
+    <div id="dehum-power-rows"></div>
+  </div>
+
+  <div class="ts" id="last-update">Last update: —</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     SETPOINTS TAB
+═══════════════════════════════════════════════════════════ -->
+<div id="tab-setpoints" class="tab">
+  <div class="card">
+    <div class="card-title">Temperature Thresholds</div>
+    <div class="setpoint-row">
+      <span class="setpoint-lbl">Heat pump min temp<br><small style="color:var(--muted)">Aux heat kicks in below this</small></span>
+      <input class="setpoint-input" type="number" id="sp-heat_pump_min_temp_f" min="20" max="60">
+      <span class="setpoint-unit">°F</span>
+      <button class="btn-set" onclick="saveSetpoint('heat_pump_min_temp_f')">Set</button>
+    </div>
+    <div class="setpoint-row">
+      <span class="setpoint-lbl">Free cooling max temp<br><small style="color:var(--muted)">Fresh-air vent opens below this</small></span>
+      <input class="setpoint-input" type="number" id="sp-free_cool_max_temp_f" min="40" max="80">
+      <span class="setpoint-unit">°F</span>
+      <button class="btn-set" onclick="saveSetpoint('free_cool_max_temp_f')">Set</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Humidity Thresholds</div>
+    <div class="setpoint-row">
+      <span class="setpoint-lbl">Outdoor humidity vent limit<br><small style="color:var(--muted)">Fresh-air vent forced off at or above this</small></span>
+      <input class="setpoint-input" type="number" id="sp-high_humidity_pct" min="50" max="100">
+      <span class="setpoint-unit">%</span>
+      <button class="btn-set" onclick="saveSetpoint('high_humidity_pct')">Set</button>
+    </div>
+    <div class="setpoint-row">
+      <span class="setpoint-lbl">Dehumidifier timeout<br><small style="color:var(--muted)">Switches to high-cool after this</small></span>
+      <input class="setpoint-input" type="number" id="sp-dehum_max_minutes" min="5" max="120">
+      <span class="setpoint-unit">min</span>
+      <button class="btn-set" onclick="saveSetpoint('dehum_max_minutes')">Set</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Ventilation</div>
+    <div class="setpoint-row">
+      <span class="setpoint-lbl">Fresh-air vent schedule<br><small style="color:var(--muted)">Minutes per hour vent opens (0 = off)</small></span>
+      <input class="setpoint-input" type="number" id="sp-vent_minutes_per_hour" min="0" max="60">
+      <span class="setpoint-unit">min</span>
+      <button class="btn-set" onclick="saveSetpoint('vent_minutes_per_hour')">Set</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Energy Meters</div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="btn-set" onclick="resetEnergy('ac')">Reset AC meter</button>
+      <button class="btn-set" onclick="resetEnergy('dehum')">Reset Dehum meter</button>
+    </div>
+    <p style="font-size:.75rem; color:var(--muted); margin-top:8px;">
+      Note: SDM120 energy reset may require front-panel button if Modbus reset is unsupported by your firmware version.
+    </p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     ZONES TAB
+═══════════════════════════════════════════════════════════ -->
+<div id="tab-zones" class="tab">
+  <div class="card">
+    <div class="card-title">Zone Configuration</div>
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-lbl">Theater zone</div>
+        <div style="font-size:.76rem; color:var(--muted)">Enable damper control for theater room</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="tog-theater" onchange="saveToggle('theater_enabled', this.checked)">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">System Override</div>
+    <p style="font-size:.82rem; color:var(--muted); margin-bottom:14px;">
+      Force the system off (all compressor/heat outputs disabled). Fan and
+      dampers remain in circulation mode. Use during maintenance or extended absence.
+    </p>
+    <div class="btn-group">
+      <button class="btn-mode" id="btn-auto" onclick="setModeOverride('auto')">Auto</button>
+      <button class="btn-mode" id="btn-off"  onclick="setModeOverride('off')">Force Off</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     I/O TAB  (SCADA diagnostic view)
+═══════════════════════════════════════════════════════════ -->
+<div id="tab-io" class="tab">
+  <div class="card">
+    <div class="card-title">Relay Outputs (9)</div>
+    <div class="io-grid" id="io-outputs"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Thermostat Inputs (9)</div>
+    <div class="io-grid" id="io-inputs"></div>
+  </div>
+  <div class="ts" id="io-ts">Last update: —</div>
+</div>
+
+
+<script>
+// ─────────────────────────────────────────────────────────────
+// Tab navigation
+// ─────────────────────────────────────────────────────────────
+function showTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ─────────────────────────────────────────────────────────────
+// Data refresh
+// ─────────────────────────────────────────────────────────────
+const RELAY_LABELS = {
+  high_cool:          'High Cool',
+  low_cool:           'Low Cool',
+  high_heat:          'Aux Heat',
+  reversing_valve:    'Rev Valve',
+  fan_on:             'Fan',
+  theater_damper:     'Theater Damper',
+  downstairs_damper:  'Downstairs Damper',
+  vent_open:          'Vent',
+  dehumidifier_on:    'Dehumidifier',
+};
+const INPUT_LABELS = {
+  input_main_low_cool:    'Main Low Cool',
+  input_main_high_cool:   'Main High Cool',
+  input_main_heat:        'Main Heat',
+  input_theater_cool:     'Theater Cool',
+  input_theater_heat:     'Theater Heat',
+  input_downstairs_cool:  'Dwn Cool',
+  input_downstairs_heat:  'Dwn Heat',
+  input_high_humidity:    'High Humidity',
+  input_vent_in:          'Vent In',
+};
+
+function fmt(val, decimals, unit) {
+  if (val === undefined || val === null) return '—';
+  return val.toFixed(decimals) + unit;
+}
+
+function powerRows(data, prefix) {
+  const fields = [
+    ['Power',        `${prefix}_power_w`,      0, ' W'],
+    ['Current',      `${prefix}_current_a`,    2, ' A'],
+    ['Voltage',      `${prefix}_voltage_v`,    1, ' V'],
+    ['Energy',       `${prefix}_energy_kwh`,   3, ' kWh'],
+    ['Power Factor', `${prefix}_power_factor`, 2, ''],
+    ['Frequency',    `${prefix}_frequency_hz`, 1, ' Hz'],
+  ];
+  return fields.map(([lbl, key, dec, unit]) =>
+    `<div class="power-row"><span>${lbl}</span><span class="power-val">${fmt(data[key], dec, unit)}</span></div>`
+  ).join('');
+}
+
+async function refresh() {
+  try {
+    const resp = await fetch('/api/status');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const d = await resp.json();
+
+    document.getElementById('conn-dot').className = 'ok';
+
+    // Mode badge
+    const mode = (d.mode || 'off').toLowerCase();
+    const badge = document.getElementById('mode-badge');
+    badge.textContent = (d.mode || '—').replace(/_/g,' ').toUpperCase();
+    badge.className   = mode;
+
+    // Compressor
+    document.getElementById('comp-state').textContent =
+      d.compressor_on === undefined ? '—' : (d.compressor_on ? '🟢 ON' : '⚫ OFF');
+
+    // Sensors
+    document.getElementById('indoor-temp').textContent  = fmt(d.indoor_temp_f,     1, '°F');
+    document.getElementById('indoor-hum').textContent   = fmt(d.indoor_humidity_pct, 1, '%');
+    document.getElementById('outdoor-temp').textContent = fmt(d.outdoor_temp_f,    1, '°F');
+    document.getElementById('outdoor-hum').textContent  = fmt(d.outdoor_humidity_pct, 1, '%');
+
+    // Relay chips
+    const chips = document.getElementById('relay-chips');
+    chips.innerHTML = Object.entries(RELAY_LABELS).map(([key, lbl]) =>
+      `<span class="chip ${d[key] ? 'on' : ''}">${lbl}</span>`
+    ).join('');
+
+    // Power
+    document.getElementById('ac-power-rows').innerHTML    = powerRows(d, 'ac');
+    document.getElementById('dehum-power-rows').innerHTML = powerRows(d, 'dehum');
+
+    // Timestamp
+    const ts = d.timestamp ? new Date(d.timestamp * 1000).toLocaleTimeString() : '—';
+    document.getElementById('last-update').textContent = 'Last update: ' + ts;
+
+    // I/O tab
+    const outputs = document.getElementById('io-outputs');
+    outputs.innerHTML = Object.entries(RELAY_LABELS).map(([key, lbl]) =>
+      `<div class="io-cell ${d[key] ? 'active' : ''}">
+        <div class="io-label">${lbl}</div>
+        <div class="io-state">${d[key] ? 'ON' : 'off'}</div>
+       </div>`
+    ).join('');
+
+    const inputs = document.getElementById('io-inputs');
+    inputs.innerHTML = Object.entries(INPUT_LABELS).map(([key, lbl]) =>
+      `<div class="io-cell ${d[key] ? 'active' : ''}">
+        <div class="io-label">${lbl}</div>
+        <div class="io-state">${d[key] ? 'ACTIVE' : 'idle'}</div>
+       </div>`
+    ).join('');
+
+    document.getElementById('io-ts').textContent = 'Last update: ' + ts;
+    showError(null);
+
+  } catch (err) {
+    document.getElementById('conn-dot').className = 'err';
+    showError('Status unavailable: ' + err.message);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Load config into setpoint inputs
+// ─────────────────────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const resp = await fetch('/api/config');
+    const cfg  = await resp.json();
+
+    const keys = ['heat_pump_min_temp_f','free_cool_max_temp_f',
+                  'high_humidity_pct','dehum_max_minutes','vent_minutes_per_hour'];
+    keys.forEach(k => {
+      const el = document.getElementById('sp-' + k);
+      if (el && cfg[k] !== undefined) el.value = cfg[k];
+    });
+
+    const theater = document.getElementById('tog-theater');
+    if (theater) theater.checked = !!cfg.theater_enabled;
+
+    const mode = cfg.mode_override || 'auto';
+    document.getElementById('btn-auto').className =
+      'btn-mode' + (mode === 'auto' ? ' active-auto' : '');
+    document.getElementById('btn-off').className  =
+      'btn-mode' + (mode === 'off'  ? ' active-off'  : '');
+
+  } catch (err) {
+    console.warn('Config load failed:', err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Setpoint save
+// ─────────────────────────────────────────────────────────────
+async function saveSetpoint(key) {
+  const input = document.getElementById('sp-' + key);
+  const btn   = input.parentElement.querySelector('.btn-set');
+  const value = key.endsWith('_pct') || key.endsWith('_f') || key.endsWith('_minutes') || key.endsWith('_hour')
+                ? parseInt(input.value, 10) : input.value;
+
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key, value}),
+    });
+    const result = await resp.json();
+    if (resp.ok && result.ok) {
+      btn.textContent = '✓ Saved';
+      btn.classList.add('saved');
+      setTimeout(() => { btn.textContent = 'Set'; btn.classList.remove('saved'); }, 2000);
+    } else {
+      showError('Save failed: ' + (result.error || resp.statusText));
+    }
+  } catch (err) {
+    showError('Save failed: ' + err.message);
+  }
+}
+
+async function saveToggle(key, value) {
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key, value}),
+    });
+    if (!resp.ok) showError('Toggle failed');
+  } catch (err) {
+    showError('Toggle failed: ' + err.message);
+  }
+}
+
+async function setModeOverride(mode) {
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: 'mode_override', value: mode}),
+    });
+    if (resp.ok) {
+      document.getElementById('btn-auto').className =
+        'btn-mode' + (mode === 'auto' ? ' active-auto' : '');
+      document.getElementById('btn-off').className =
+        'btn-mode' + (mode === 'off' ? ' active-off' : '');
+    } else {
+      showError('Mode override failed');
+    }
+  } catch (err) {
+    showError('Mode override failed: ' + err.message);
+  }
+}
+
+async function resetEnergy(circuit) {
+  if (!confirm('Reset ' + circuit.toUpperCase() + ' energy counter?')) return;
+  await fetch('/api/cmd', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cmd: 'reset_energy', circuit}),
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Error banner
+// ─────────────────────────────────────────────────────────────
+function showError(msg) {
+  const el = document.getElementById('error-banner');
+  if (msg) { el.textContent = msg; el.style.display = 'block'; }
+  else      { el.style.display = 'none'; }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────
+refresh();
+loadConfig();
+setInterval(refresh,     10000);   // refresh status every 10 s
+setInterval(loadConfig,  60000);   // reload config every 60 s (catches external changes)
+</script>
+</body>
+</html>
