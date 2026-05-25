@@ -24,7 +24,7 @@
  *   - Arduino_LED_Matrix (built-in 12x8 LED matrix)
  */
 
-#include <Bridge.h>
+#include <Arduino_RouterBridge.h>
 #include <Arduino_LED_Matrix.h>
 
 // ─────────────────────────────────────────────────────────────
@@ -126,6 +126,10 @@ struct Outputs {
 // ─────────────────────────────────────────────────────────────
 // GLOBAL STATE
 // ─────────────────────────────────────────────────────────────
+
+// Pixel glyph type — defined here (top of globals) so the Arduino
+// preprocessor places the typedef before any auto-generated prototypes.
+typedef uint8_t Glyph[5][3];
 
 Config      cfg;
 Inputs      inp;
@@ -429,93 +433,72 @@ void applyOutputs() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// exposeToBridge
-// Publish current relay output states and thermostat input states
-// to the Arduino Bridge shared data store. bridge_daemon.py reads
-// these every ~10 s and assembles the full MQTT payload.
+// BRIDGE RPC HANDLERS  (Arduino_RouterBridge / Uno Q)
 //
-// Key naming: "o_" prefix = output (relay), "i_" prefix = input.
-// Compact single-char suffixes match the MCU key map in mqtt-payload-spec.md.
+// Registered in setup() with Bridge.provide_safe().
+// All callbacks run in the main Zephyr thread (via __loopHook)
+// so they may safely read/write MCU globals without a mutex.
+//
+// Python bridge_daemon.py calls these via Bridge.call() every ~10 s.
+//
+// Output bitmask order (9 chars, index 0-8):
+//   highCool lowCool highHeat revValve theaterDamper downDamper
+//   ventOut dehumOn fanOn
+//
+// Input bitmask order (9 chars, index 0-8):
+//   mainLowCool mainHighCool mainHeat theaterCool theaterHeat
+//   downCool downHeat highHumidity ventIn
 // ─────────────────────────────────────────────────────────────
 
-void exposeToBridge() {
-  // Relay outputs
-  Bridge.put("o_hc", out.highCool      ? "1" : "0");  // high_cool
-  Bridge.put("o_lc", out.lowCool       ? "1" : "0");  // low_cool
-  Bridge.put("o_hh", out.highHeat      ? "1" : "0");  // high_heat
-  Bridge.put("o_rv", out.revValve      ? "1" : "0");  // reversing_valve
-  Bridge.put("o_fn", out.fanOn         ? "1" : "0");  // fan_on
-  Bridge.put("o_td", out.theaterDamper ? "1" : "0");  // theater_damper
-  Bridge.put("o_dd", out.downDamper    ? "1" : "0");  // downstairs_damper
-  Bridge.put("o_vo", out.ventOut       ? "1" : "0");  // vent_open
-  Bridge.put("o_dh", out.dehumOn       ? "1" : "0");  // dehumidifier_on
-
-  // Thermostat / humidity inputs (for HMI SCADA view and diagnostics)
-  Bridge.put("i_mlc", inp.mainLowCool  ? "1" : "0");  // main low cool
-  Bridge.put("i_mhc", inp.mainHighCool ? "1" : "0");  // main high cool
-  Bridge.put("i_mh",  inp.mainHeat     ? "1" : "0");  // main heat
-  Bridge.put("i_tc",  inp.theaterCool  ? "1" : "0");  // theater cool
-  Bridge.put("i_th",  inp.theaterHeat  ? "1" : "0");  // theater heat
-  Bridge.put("i_dc",  inp.downCool     ? "1" : "0");  // downstairs cool
-  Bridge.put("i_dh",  inp.downHeat     ? "1" : "0");  // downstairs heat
-  Bridge.put("i_hh",  inp.highHumidity ? "1" : "0");  // high humidity
-  Bridge.put("i_vi",  inp.ventIn       ? "1" : "0");  // vent in
+// Linux calls get_outputs() → 9-char relay bitmask ("0"/"1" per relay)
+static String rpc_get_outputs() {
+  char buf[10];
+  buf[0] = out.highCool      ? '1' : '0';
+  buf[1] = out.lowCool       ? '1' : '0';
+  buf[2] = out.highHeat      ? '1' : '0';
+  buf[3] = out.revValve      ? '1' : '0';
+  buf[4] = out.theaterDamper ? '1' : '0';
+  buf[5] = out.downDamper    ? '1' : '0';
+  buf[6] = out.ventOut       ? '1' : '0';
+  buf[7] = out.dehumOn       ? '1' : '0';
+  buf[8] = out.fanOn         ? '1' : '0';
+  buf[9] = '\0';
+  return String(buf);
 }
 
-// ─────────────────────────────────────────────────────────────
-// handleBridgeCommands
-// Read SensorFlags and Config updates pushed by bridge_daemon.py.
-// Called every loop cycle; Bridge.get() returns immediately if
-// the key hasn't changed since last read.
-// ─────────────────────────────────────────────────────────────
+// Linux calls get_inputs() → 9-char thermostat/humidity input bitmask
+static String rpc_get_inputs() {
+  char buf[10];
+  buf[0] = inp.mainLowCool  ? '1' : '0';
+  buf[1] = inp.mainHighCool ? '1' : '0';
+  buf[2] = inp.mainHeat     ? '1' : '0';
+  buf[3] = inp.theaterCool  ? '1' : '0';
+  buf[4] = inp.theaterHeat  ? '1' : '0';
+  buf[5] = inp.downCool     ? '1' : '0';
+  buf[6] = inp.downHeat     ? '1' : '0';
+  buf[7] = inp.highHumidity ? '1' : '0';
+  buf[8] = inp.ventIn       ? '1' : '0';
+  buf[9] = '\0';
+  return String(buf);
+}
 
-void handleBridgeCommands() {
-  char buf[16] = "";
+// Linux calls set_flags(hpo, ahn, trf, vok, vbl) → pushes SensorFlags
+static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl) {
+  sf.heatPumpOk    = hpo;
+  sf.auxHeatNeeded = ahn;
+  sf.tempRisingFast = trf;
+  sf.ventOk        = vok;
+  sf.ventBlocked   = vbl;
+  return true;
+}
 
-  // ── SensorFlags ────────────────────────────────────────────
-  // Keys match what bridge_daemon.py writes via bridge.put()
-
-  if (Bridge.get("sf_hpo", buf, sizeof(buf)) > 0) {   // heatPumpOk
-    sf.heatPumpOk = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("sf_ahn", buf, sizeof(buf)) > 0) {   // auxHeatNeeded
-    sf.auxHeatNeeded = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("sf_trf", buf, sizeof(buf)) > 0) {   // tempRisingFast
-    sf.tempRisingFast = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("sf_vok", buf, sizeof(buf)) > 0) {   // ventOk
-    sf.ventOk = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("sf_vbl", buf, sizeof(buf)) > 0) {   // ventBlocked
-    sf.ventBlocked = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-
-  // ── Config ─────────────────────────────────────────────────
-
-  if (Bridge.get("cfg_th", buf, sizeof(buf)) > 0) {   // theaterEnabled
-    cfg.theaterEnabled = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("cfg_vph", buf, sizeof(buf)) > 0) {  // ventMinPerHour
-    uint8_t v = (uint8_t)atoi(buf);
-    if (v <= 60) cfg.ventMinPerHour = v;
-    buf[0] = '\0';
-  }
-  if (Bridge.get("cfg_mo", buf, sizeof(buf)) > 0) {   // modeOverride
-    cfg.modeOverride = (buf[0] == '1');
-    buf[0] = '\0';
-  }
-  if (Bridge.get("cfg_dmm", buf, sizeof(buf)) > 0) {  // dehumMaxMinutes
-    uint8_t v = (uint8_t)atoi(buf);
-    if (v >= 5 && v <= 120) cfg.dehumMaxMinutes = v;
-    buf[0] = '\0';
-  }
+// Linux calls set_config(te, vph, mo, dmm) → pushes Config
+static bool rpc_set_config(bool te, int vph, bool mo, int dmm) {
+  cfg.theaterEnabled  = te;
+  cfg.ventMinPerHour  = (uint8_t)constrain(vph, 0, 60);
+  cfg.modeOverride    = mo;
+  cfg.dehumMaxMinutes = (uint8_t)constrain(dmm, 5, 120);
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -569,7 +552,7 @@ const unsigned long MAT_PAGE_MS  = 3000UL; // page hold time
 const unsigned long MAT_HEART_MS =  500UL; // heartbeat half-period (1 Hz)
 
 // 3-wide x 5-tall pixel glyphs (row-major, top-to-bottom)
-typedef uint8_t Glyph[5][3];
+// (Glyph typedef is defined earlier in the globals section)
 
 static const Glyph GL_HEAT = {             // H
   {1,0,1},{1,0,1},{1,1,1},{1,0,1},{1,0,1}
@@ -728,6 +711,13 @@ void setup() {
   }
   Bridge.begin();
 
+  // Register RPC methods callable by bridge_daemon.py.
+  // provide_safe() guarantees callbacks run in the main Zephyr thread.
+  Bridge.provide_safe("get_outputs", rpc_get_outputs);
+  Bridge.provide_safe("get_inputs",  rpc_get_inputs);
+  Bridge.provide_safe("set_flags",   rpc_set_flags);
+  Bridge.provide_safe("set_config",  rpc_set_config);
+
   Serial.println(F("[HVAC] Controller ready"));
 }
 
@@ -739,8 +729,6 @@ void loop() {
   readDigitalInputs();
   runZoneLogic();
   applyOutputs();
-  exposeToBridge();
-  handleBridgeCommands();
   updateLEDMatrix();   // refresh LED matrix diagnostic display
   delay(100);
 }
