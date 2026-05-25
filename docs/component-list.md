@@ -106,6 +106,28 @@ existing HVAC thermostat wiring — no AC-DC conversion module required.
 
 ---
 
+## Local HMI Display
+
+A standalone touchscreen panel on the same WiFi network. Communicates with the
+Uno Q exclusively via MQTT — no wiring into the enclosure required. Used to view
+live system state and adjust all configurable setpoints (temperature thresholds,
+humidity limits, vent schedule, zone enable/disable).
+
+| Qty | Component | Notes |
+|-----|-----------|-------|
+| 1 | **Elecrow CrowPanel 2.1" ESP32 Rotary Display** (EoW02CSCM3A or equivalent) | 2.1-inch round IPS display, 480×480, capacitive touch + rotary knob. ESP32-S3R8 processor (240 MHz dual-core, 8 MB PSRAM, 16 MB Flash). WiFi 802.11 b/g/n 2.4 GHz. Programmed via Arduino IDE with LVGL. Powered via USB-C 5V/1A. ~$25–35. Product wiki: elecrow.com/wiki/CrowPanel_2.1inch-HMI_ESP32_Rotary_Display |
+| 1 | **USB-C 5V/1A power supply + cable** | For permanent panel mounting. A small USB wall adapter or a DIN-rail 5V USB supply keeps the HMI powered independently from the main controller enclosure. |
+| 1 | **Surface-mount panel box** (optional) | For wall-mounting the round HMI near the main thermostat or in a utility area. The CrowPanel has a circular bezel suited to a standard round electrical box cutout. |
+
+**Programming note:** The CrowPanel ESP32 sketch (not in this repository) needs:
+- `PubSubClient` library for MQTT
+- `ArduinoJson` for payload parsing
+- `LVGL` (bundled with CrowPanel SDK) for the UI
+- WiFi credentials and MQTT broker address configured at build time or via a
+  first-boot provisioning screen
+
+---
+
 ## Wiring + Mounting
 
 | Qty | Component | Notes |

@@ -308,15 +308,18 @@ Flask app on port 80. Endpoints:
 
 | Method | Endpoint              | Action                                      |
 |--------|-----------------------|---------------------------------------------|
-| GET    | /config               | Returns current MCU state + config as JSON  |
+| GET    | /config               | Returns current MCU state + full config as JSON |
+| POST   | /config/setpoint      | `{"key": "heat_pump_min_temp_f", "value": 38}` — set any config parameter |
 | POST   | /config/theater       | `{"enabled": true/false}` — enable/disable theater zone |
 | POST   | /config/vent          | `{"minutesPerHour": 10}` — set vent schedule |
 | POST   | /config/mode-override | `{"mode": "off"}` — force system off (safety) |
 
 Config changes are:
-1. Validated by Flask
+1. Validated by Flask (type check + range check)
 2. Written to `/etc/hvac/config.json` for persistence across reboots
-3. Pushed to MCU via Arduino Bridge RPC call
+3. Pushed to MCU via Arduino Bridge RPC call (where relevant)
+4. Republished to `home/hvac/config` MQTT topic (retained) so HMI and Home Assistant
+   see the update immediately without polling
 
 ### 6c. MQTT
 
@@ -325,7 +328,38 @@ Broker address configured in `/etc/hvac/config.json`.
 
 Topics:
 - `home/hvac/status` — published every 10 seconds, retained
-- `home/hvac/cmd` — subscribed, accepts JSON commands (same schema as POST endpoints)
+- `home/hvac/config` — published on any config change and once at startup, retained
+- `home/hvac/cmd` — subscribed; `setConfig` commands change any parameter by key/value
+
+### 6d. HMI Device — Elecrow CrowPanel 2.1" ESP32
+
+A standalone local HMI on the same WiFi network. Communicates **exclusively via
+MQTT** — no direct wiring to the Uno Q.
+
+**Hardware:** Elecrow CrowPanel 2.1-inch round IPS display (480×480), capacitive
+touch + rotary knob, ESP32-S3R8 processor, WiFi 802.11 b/g/n. Programmed via
+Arduino IDE with LVGL for the UI.
+
+**Data flow:**
+```
+home/hvac/status  ──► HMI subscribes ──► updates live display (10 s refresh)
+home/hvac/config  ──► HMI subscribes ──► shows current setpoints (retained)
+home/hvac/cmd     ◄── HMI publishes  ◄── user adjusts setpoint via rotary knob
+```
+
+**Screen layout (4 pages, knob-press to navigate):**
+
+| Page | Content |
+|------|---------|
+| Status | Mode, indoor temp/humidity, outdoor temp/humidity, compressor on/off |
+| Outputs | Live state of all 9 relay outputs |
+| Setpoints | Edit: heat pump min temp, aux heat threshold, free-cool temp, humidity vent limit, dehumidifier timeout, vent minutes/hour |
+| Zone config | Theater enable/disable, mode override (force off) |
+
+The HMI publishes `{"cmd":"setConfig","key":"...","value":...}` to `home/hvac/cmd`
+when the user confirms a setpoint change. The broker delivers it to `bridge_daemon.py`,
+which validates, persists, updates the MCU flags, and republishes `home/hvac/config`
+— closing the loop back to the HMI display.
 
 ---
 
