@@ -327,8 +327,23 @@ void runZoneLogic() {
   // are allowed without triggering the interlock.
   // ─────────────────────────────────────────────────────────
 
-  bool wasCompOn  = out.highCool  || out.lowCool;   // heat pump compressor was running
+  bool wasCompOn   = out.highCool  || out.lowCool;   // heat pump compressor was running
   bool wantsCompOn = desired.highCool || desired.lowCool;
+
+  // ── Mode-reversal guard ────────────────────────────────────
+  // If the reversing valve must change direction while the compressor is
+  // still spinning, we cannot wait for the interlock timer — the timer
+  // only starts when the compressor turns off, so interlockActive() would
+  // never fire.  Force the compressor off immediately, hold the valve in
+  // its current position, and let the normal anti-short-cycle logic below
+  // protect the restart in the new mode.
+  if (wasCompOn && wantsCompOn && (desired.revValve != out.revValve)) {
+    desired.highCool = false;
+    desired.lowCool  = false;
+    desired.highHeat = false;
+    desired.revValve = out.revValve;   // hold valve; restart in new mode after interlock
+    wantsCompOn      = false;          // compressor is now off — let timer start below
+  }
 
   // Start the interlock timer when the heat pump compressor turns off
   if (wasCompOn && !wantsCompOn) {
@@ -343,15 +358,6 @@ void runZoneLogic() {
     desired.revValve = out.revValve;   // hold current valve position
     desired.fanOn    = out.fanOn;      // hold current fan state
     // Dehumidifier can still run during a compressor lockout period
-  }
-
-  // Block reversing valve flip while compressor is running and interlock active
-  // (prevents switching heat↔cool with compressor spinning)
-  if (wasCompOn && wantsCompOn && (desired.revValve != out.revValve) && interlockActive()) {
-    desired.revValve = out.revValve;
-    desired.highCool = out.highCool;
-    desired.lowCool  = out.lowCool;
-    desired.highHeat = out.highHeat;
   }
 
   // ─────────────────────────────────────────────────────────
