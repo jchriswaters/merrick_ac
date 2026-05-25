@@ -16,6 +16,7 @@ import sys
 # ── dependency check ──────────────────────────────────────────
 try:
     from pymodbus.client import ModbusSerialClient
+    from pymodbus.exceptions import ModbusIOException
 except ImportError:
     print()
     print("ERROR: pymodbus is not installed.")
@@ -85,26 +86,34 @@ def read_sht30(client, address, label):
       [2] status/spare
     """
     print(f"\n--- {label} (Modbus address 0x{address:02X}) ---")
-    result = _modbus_read(client, 0, 3, address)
+    try:
+        result = _modbus_read(client, 0, 3, address)
+    except ModbusIOException:
+        result = None
 
-    if result.isError():
-        print(f"  ERROR: {result}")
-        print("  Possible causes:")
-        print("    - Wrong COM port")
-        print("    - A+/B- wires swapped (try swapping them)")
-        print("    - Sensor not powered (check 12 V supply)")
-        print("    - Wrong Modbus address (check sensor DIP switches)")
-        print("    - Wrong baud rate (default is 9600; check sensor label)")
+    if result is None or (hasattr(result, 'isError') and result.isError()):
+        print(f"  ERROR: No response from sensor")
+        print("  Work through these checks in order:")
+        print("    1. SWAP A+/B- wires on the adapter — most common cause")
+        print("    2. Measure V+ on sensor with voltmeter — should read ~12 V")
+        print("    3. Check sensor label for baud rate (default 9600)")
+        print("    4. Check sensor label/DIP switches for Modbus address")
         return
 
     raw = result.registers
-    temp_c = to_signed(raw[0]) / 10.0
+    # Register map (confirmed against hardware 2026-05-25):
+    #   [0] temperature x100, signed int16  (0.01 deg C resolution)
+    #   [1] humidity    x100, unsigned int16 (0.01 %RH resolution)
+    #   [2] status byte — NOT temperature; ignored
+    temp_c = to_signed(raw[0]) / 100.0
     temp_f = temp_c * 9 / 5 + 32
-    hum    = to_signed(raw[1]) / 10.0
+    hum    = raw[1] / 100.0
 
-    print(f"  Temperature : {temp_c:.1f} C  /  {temp_f:.1f} F")
-    print(f"  Humidity    : {hum:.1f} %RH")
+    print(f"  Temperature : {temp_c:.2f} C  /  {temp_f:.2f} F")
+    print(f"  Humidity    : {hum:.2f} %RH")
     print(f"  Raw regs    : {raw}")
+    if len(raw) > 2:
+        print(f"  Status reg  : 0x{raw[2]:04X}  (informational; not temperature data)")
 
     # basic sanity checks
     if not (-40 <= temp_c <= 125):

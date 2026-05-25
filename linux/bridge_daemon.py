@@ -76,15 +76,14 @@ SDM120_PF         = 0x001E
 SDM120_FREQ       = 0x0046
 SDM120_ENERGY_IMP = 0x0156
 
-# SHT30 RS485 transmitter register map (common Chinese wall-mount variant)
-# Function code 03 (read holding registers), start = 0x0000, count = 3
-# Register 0: temperature × 10, signed int16, unit = 0.1 °C
-# Register 1: humidity   × 10, unsigned int16, unit = 0.1 %RH
-# Register 2: dew point  × 10, signed int16, unit = 0.1 °C
-# NOTE: Verify against your specific transmitter's datasheet — register maps
-#       vary between manufacturers. Adjust SHT30_START / SHT30_COUNT if needed.
+# SHT30 RS485 transmitter register map (confirmed against hardware 2026-05-25)
+# Function code 03 (read holding registers), start = 0x0000, count = 2
+# Register 0: temperature × 100, signed int16, unit = 0.01 °C
+# Register 1: humidity    × 100, unsigned int16, unit = 0.01 %RH
+# Register 2: status/flags byte — NOT dew point; do not read as temperature
+# Verified: raw 2474 → 24.74 °C, raw 4640 → 46.40 %RH
 SHT30_START = 0x0000
-SHT30_COUNT = 3
+SHT30_COUNT = 2   # read only the two data registers; skip register 2 (status)
 
 # SensorFlags: rolling indoor temperature history for tempRisingFast check
 TEMP_HISTORY_MAXLEN  = 120         # 120 samples × 10 s = 20 min of history
@@ -184,36 +183,76 @@ def _raw_to_signed(val: int) -> int:
     return val - 65536 if val > 32767 else val
 
 
-def read_sht30(modbus: "ModbusSerialClient", addr: int, label: str) -> Optional[dict]:
+def _mb_read_holding(modbus, address: int, count: int, dev_addr: int):
     """
-    Read temperature, humidity, and dew point from one SHT30 RS485 transmitter.
+    Version-agnostic read_holding_registers call.
 
-    Returns a dict with keys ending in _temp_f, _humidity_pct, _dewpoint_f,
-    or None if the read fails. The label ("indoor" | "outdoor") is used as
-    a key prefix so the caller can merge results into the status payload.
+    pymodbus renamed the slave-address keyword across major versions:
+      2.x        : unit=
+      3.0–3.12   : slave=
+      3.13+      : device_id=
+    Try each in order so the daemon runs on whatever version pip installs.
+    """
+    for kw in ("device_id", "slave", "unit"):
+        try:
+            return modbus.read_holding_registers(
+                address=address, count=count, **{kw: dev_addr}
+            )
+        except TypeError:
+            continue
+    return modbus.read_holding_registers(address, count, dev_addr)
+
+
+def _mb_read_input(modbus, address: int, count: int, dev_addr: int):
+    """Version-agnostic read_input_registers call (same keyword evolution)."""
+    for kw in ("device_id", "slave", "unit"):
+        try:
+            return modbus.read_input_registers(
+                address=address, count=count, **{kw: dev_addr}
+            )
+        except TypeError:
+            continue
+    return modbus.read_input_registers(address, count, dev_addr)
+
+
+def _mb_write_register(modbus, address: int, value: int, dev_addr: int):
+    """Version-agnostic write_register call."""
+    for kw in ("device_id", "slave", "unit"):
+        try:
+            return modbus.write_register(
+                address=address, value=value, **{kw: dev_addr}
+            )
+        except TypeError:
+            continue
+    return modbus.write_register(address, value, dev_addr)
+
+
+def read_sht30(modbus, addr: int, label: str) -> Optional[dict]:
+    """
+    Read temperature and humidity from one SHT30 RS485 transmitter.
+
+    Register map (confirmed against hardware):
+      [0] temperature × 100, signed int16  → divide by 100 for °C
+      [1] humidity    × 100, unsigned int16 → divide by 100 for %RH
+      [2] status byte — ignored
+
+    Returns a dict with keys {label}_temp_f and {label}_humidity_pct,
+    or None if the read fails.
     """
     try:
-        resp = modbus.read_holding_registers(
-            address=SHT30_START, count=SHT30_COUNT, slave=addr
-        )
+        resp = _mb_read_holding(modbus, SHT30_START, SHT30_COUNT, addr)
         if resp.isError():
             log.warning("SHT30 addr=0x%02X (%s) read error", addr, label)
             return None
 
-        temp_c = _raw_to_signed(resp.registers[0]) / 10.0
-        hum    = resp.registers[1] / 10.0
-        dew_c  = _raw_to_signed(resp.registers[2]) / 10.0 if SHT30_COUNT >= 3 else None
-
+        temp_c = _raw_to_signed(resp.registers[0]) / 100.0
+        hum    = resp.registers[1] / 100.0
         temp_f = temp_c * 9.0 / 5.0 + 32.0
-        dew_f  = dew_c  * 9.0 / 5.0 + 32.0 if dew_c is not None else None
 
-        result = {
-            f"{label}_temp_f":     round(temp_f, 1),
+        return {
+            f"{label}_temp_f":       round(temp_f, 1),
             f"{label}_humidity_pct": round(hum, 1),
         }
-        if dew_f is not None:
-            result[f"{label}_dewpoint_f"] = round(dew_f, 1)
-        return result
 
     except ModbusException as exc:
         log.warning("SHT30 addr=0x%02X (%s) exception: %s", addr, label, exc)
@@ -223,10 +262,10 @@ def read_sht30(modbus: "ModbusSerialClient", addr: int, label: str) -> Optional[
 # RS485 MODBUS — SDM120 ENERGY METERS
 # ──────────────────────────────────────────────────────────────
 
-def _read_sdm120_float(modbus: "ModbusSerialClient", addr: int, reg: int) -> Optional[float]:
+def _read_sdm120_float(modbus, addr: int, reg: int) -> Optional[float]:
     """Read one IEEE 754 float from two consecutive SDM120 input registers."""
     try:
-        resp = modbus.read_input_registers(address=reg, count=2, slave=addr)
+        resp = _mb_read_input(modbus, reg, 2, addr)
         if resp.isError():
             return None
         packed = struct.pack(">HH", resp.registers[0], resp.registers[1])
@@ -274,7 +313,7 @@ def reset_sdm120_energy(modbus: "ModbusSerialClient", addr: int) -> bool:
     """
     try:
         # Write 0x0003 to holding register 0xF010 — SDM120 reset command
-        resp = modbus.write_register(address=0xF010, value=0x0003, slave=addr)
+        resp = _mb_write_register(modbus, 0xF010, 0x0003, addr)
         if resp.isError():
             log.warning("SDM120 energy reset: Modbus error for addr=0x%02X", addr)
             return False
