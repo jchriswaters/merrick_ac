@@ -21,6 +21,11 @@ tools/zephyr-core.elf
 # Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Desktop HMI — contains controller password
+desktop-hmi/config.json
 
 # Editor / OS noise
 .DS_Store

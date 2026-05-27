@@ -1,0 +1,10 @@
+{
+  "controller_host":     "192.168.1.197",
+  "controller_user":     "arduino",
+  "controller_password": "REPLACE_ME",
+  "ssh_port":            22,
+  "router_socket":       "/var/run/arduino-router.sock",
+  "mqtt_status_topic":   "home/hvac/status",
+  "poll_interval_s":     1.0,
+  "ssh_keepalive_s":     30
+}
