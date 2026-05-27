@@ -52,6 +52,30 @@ Uno Q port, which happily *sinks* the 5 V) and downstream (to whatever's
 plugged into the hub's USB-A ports). The Uno Q sees a self-powered USB device
 on a port that now has VBUS, enumerates it normally, and `/dev/ttyUSB0` appears.
 
+**Second-order issue:** the same VBUS-from-hub trick that enables enumeration
+also tricks the Uno Q's Type-C controller into thinking it's plugged into a
+host PC (the "I'm receiving power, I must be a peripheral" inference). The
+**data role** auto-switches to `device`, the USB host controller never comes
+up, and even though VBUS is present nothing enumerates downstream. The cure is
+to force the role back to `host` in software:
+
+```bash
+sudo sh -c 'echo host > /sys/class/usb_role/4e00000.usb-role-switch/role'
+```
+
+That write **does** succeed (unlike writes to `power_role`). After the role
+switch, `xhci-hcd` initialises the host controller and the hub + downstream
+devices enumerate normally.
+
+Because the role detection re-runs on every boot, this fix has to be applied
+on every boot. The repo ships a systemd unit that does it automatically:
+
+```
+linux/uno-q-usb-host-role.service
+```
+
+Install it with the rest of the units in §1.7 below.
+
 ### 1.4 Clone the repo on the board
 
 ```bash
@@ -94,17 +118,24 @@ This rewrites `/var/lib/arduino-router/config/10-imola.conf` to assert SRST in
 `ExecStartPre` (and *not* release it) and release it only via `--after-ready`,
 ensuring the router is fully open on `/dev/ttyHS1` before the MCU boots.
 
-### 1.7 Install and enable the bridge daemon
+### 1.7 Install and enable the systemd services
 
 ```bash
 # on the board
 sudo cp ~/hvac-controller/linux/hvac-bridge.service /etc/systemd/system/
+sudo cp ~/hvac-controller/linux/uno-q-usb-host-role.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable uno-q-usb-host-role.service
 sudo systemctl enable hvac-bridge.service
-# leave it stopped for now — we still need to flash the MCU
+sudo systemctl start uno-q-usb-host-role.service   # apply role fix now
+# leave hvac-bridge stopped for now — we still need to flash the MCU
 ```
 
-The service runs as user `arduino` from `/home/arduino/hvac-controller/linux/`.
+- `uno-q-usb-host-role.service` — on every boot, forces the Type-C controller's
+  data role back to `host` so the USB hub + FTDI dongle enumerate (see §1.3).
+  Without this, `/dev/ttyUSB0` will not appear after reboot.
+- `hvac-bridge.service` — the Python bridge daemon. Runs as user `arduino` from
+  `/home/arduino/hvac-controller/linux/`.
 
 ### 1.8 Flash the MCU sketch — see §2
 
