@@ -1,0 +1,27 @@
+[Unit]
+Description=Force Uno Q USB-C port to host data role
+Documentation=https://github.com/jchriswaters/merrick_ac/blob/master/docs/deployment.md
+# Run after the USB stack is up so the role-switch device exists
+After=systemd-udev-settle.service
+DefaultDependencies=no
+RequiresMountsFor=/sys
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Force host role even when an externally-powered USB hub is supplying VBUS,
+# which otherwise tricks the Type-C controller into device data role.
+# Without this, /dev/ttyUSB0 never appears and the RS485 sensor poll fails.
+ExecStart=/bin/sh -c '\
+    role_path=/sys/class/usb_role/4e00000.usb-role-switch/role; \
+    if [ -w "$role_path" ]; then \
+        echo host > "$role_path"; \
+    else \
+        echo "uno-q-usb-host-role: $role_path not writable" >&2; \
+        exit 1; \
+    fi'
+# Sleep then re-assert so devices behind a slow-attaching hub are seen
+ExecStartPost=/bin/sh -c 'sleep 3; echo host > /sys/class/usb_role/4e00000.usb-role-switch/role || true'
+
+[Install]
+WantedBy=multi-user.target

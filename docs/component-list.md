@@ -27,12 +27,25 @@ Factory calibrated — no user calibration required. Address set by physical DIP
 
 | Qty | Component | Specifications | Notes |
 |-----|-----------|---------------|-------|
-| 2 | **RS485 Modbus RTU Temp/Humidity Transmitter** (SHT30-based, wall-mount) | SHT30 sensing element. ±0.3°C temp, ±2% RH humidity accuracy. RS485 Modbus RTU output. 5–36V DC supply. IP54 or better. Outputs: temperature, humidity, dew point. | Search: *"RS485 Modbus SHT30 temperature humidity transmitter wall mount"*. ~$15–25 each. Available from Amazon, AliExpress, DFRobot. Verify DIP switch address configuration in product listing. |
+| 2 | **RS485 Modbus RTU Temp/Humidity Transmitter** (SHT30-based, wall-mount) | SHT30 sensing element. ±0.3°C temp, ±2% RH humidity accuracy. RS485 Modbus RTU output. 5–36V DC supply. IP54 or better. Outputs: temperature (signed int16 ×100, °C), humidity (uint16 ×100, %RH). | Search: *"RS485 Modbus SHT30 temperature humidity transmitter wall mount"*. ~$15–25 each. Available from Amazon, AliExpress, DFRobot. Verify DIP switch address configuration in product listing. |
 | 1 | **IP65 weatherproof enclosure** (small, ~100×68×50mm) | For outdoor sensor if the transmitter body is not already IP65-rated | Polycarbonate or ABS. Drill entry for cable gland. Mount sensor in shaded location away from direct sun and reflected heat. |
 
-**Bus wiring:** Both sensors daisy-chain on the same RS485 twisted-pair cable.
-Set indoor unit to Modbus address **0x01** and outdoor unit to **0x02** via DIP
-switch before installation.
+**Bus wiring:** Both sensors connect in parallel to the in-enclosure RS485 distribution
+terminal block. Set indoor unit to Modbus address **0x01** and outdoor unit to **0x02**
+via DIP switch before installation. The outdoor sensor terminates the bus with a 120 Ω
+resistor across A+ and B-.
+
+**Wire color convention** (confirmed against this build's modules — always re-verify
+against the specific module's datasheet, OEMs occasionally swap colors):
+
+| Wire color | Function                |
+|------------|-------------------------|
+| Red        | V+ (12 V DC supply)     |
+| Green      | V- (DC return / ground) |
+| Yellow     | A+ (RS485 data positive)|
+| Blue       | B- (RS485 data negative)|
+
+See `docs/system-design.md` §4b–4c for the full wiring diagram.
 
 ---
 
@@ -55,14 +68,23 @@ read directly by the Linux side. No wiring back to the Arduino MCU required.
 ## RS485 Bus Interface
 
 All sensors and power monitors are read by the Linux side (QRB2210) via a USB-RS485
-adapter plugged into the QRB2210 USB port. The FT232RL chip in the Waveshare adapter
-is supported by the Linux kernel's built-in `ftdi_sio` driver — no manual driver
-installation needed. The device appears as `/dev/ttyUSB0` when plugged in.
+adapter. The FT232RL/FT232RNL/CH340 chip in the adapter is supported by the Linux
+kernel's built-in `ftdi_sio` / `ch341` drivers — no manual driver installation needed.
+The device appears as `/dev/ttyUSB0` when plugged in.
+
+**Critical:** the Uno Q's USB-C port runs in **power-sink mode** when the board is
+powered via VIN (not USB-C). It does not provide VBUS to peripherals. A USB-RS485
+dongle plugged directly into the Uno Q **will not enumerate**. A **powered USB hub**
+between the Uno Q and the dongle is required to source VBUS. See `docs/deployment.md`
+for the diagnostic that uncovered this.
 
 | Qty | Component | Notes |
 |-----|-----------|-------|
-| 1 | **Waveshare USB to RS485/422 Industrial Grade Isolated Converter** (FT232RL + SP485EEN) | DIN-rail mountable. Galvanic isolation protects the Linux side from HVAC bus noise. FT232RL is natively supported on Debian Linux — plug-and-play as `/dev/ttyUSB0`. Screw terminals for A/B/GND. Search: *"Waveshare USB to RS485 isolated FT232RL"*. ~$15–20. |
-| 1 | **120Ω resistor, 1/4W** | RS485 bus termination — solder across A and B terminals at the outdoor sensor (far end of the bus) |
+| 1 | **USB-RS485 adapter** (FTDI FT232RL/RNL or CH340-based) | Either a bare dongle or a Waveshare USB-to-RS485 isolated converter (FT232RL + SP485EEN) works. Galvanic isolation is recommended to protect the Linux side from HVAC bus noise. Appears as `/dev/ttyUSB0`. ~$8–20 depending on isolation. |
+| 1 | **Powered USB hub** (USB 2.0+, with its own DC adapter or 5 V input) | Required between the Uno Q USB-C port and the USB-RS485 dongle. The hub's own power supply provides VBUS to both the upstream and downstream USB ports, working around the Uno Q's Type-C sink mode. Any small 4-port USB 2.0 hub with a wall-wart power supply works. Inside the enclosure, power the hub from a 12 V→5 V buck converter ($2–3) tied to the same 12 V rail as the rest of the system — eliminates the need for a separate AC outlet. Hold the hub in place with double-sided industrial tape if a DIN-mount enclosure is not available. ~$8–15. |
+| 1 | **12 V to 5 V buck converter module** (optional but recommended) | Mounts on DIN rail with a small bracket or in the enclosure. Powers the USB hub from the same 12 V supply as everything else, avoiding the need for a second wall adapter. LM2596 modules are widely available for ~$2. Pick one rated for ≥ 1 A output (the hub plus dongle plus FTDI together draw well under 500 mA). |
+| 1 | **120 Ω resistor, 1/4 W** | RS485 bus termination — wire across the A+ and B- terminals at the outdoor sensor (far end of the bus). |
+| 1 | **3-row DIN-rail terminal block strip** (or 4-row if you include a separate GND row) | In-enclosure star point for the RS485 bus. One row for A+, one for B-, one for GND reference. All four field devices and the USB-RS485 adapter land on these rows in parallel. Also use a separate 2-row block for 12 V and GND for SHT30 sensor power. |
 
 ---
 

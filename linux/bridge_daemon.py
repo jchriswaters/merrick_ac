@@ -31,11 +31,15 @@ from typing import Optional
 
 import paho.mqtt.client as mqtt
 
-# Arduino Bridge Python client — pre-installed on Uno Q Debian Linux
+# Arduino RouterBridge Python client — pre-installed on Uno Q Debian Linux.
+# Uses RPC (Bridge.call / Bridge.provide) not the old Yún key-value put/get.
+# The Bridge singleton communicates with the Go router process over IPC.
 try:
-    from bridgeclient import BridgeClient
+    from arduino.app_utils import Bridge as _MCUBridge  # type: ignore
+    _bridge_available = True
 except ImportError:
-    BridgeClient = None  # allows the file to parse on development machines
+    _MCUBridge = None
+    _bridge_available = False   # allows the file to parse on dev machines
 
 # pymodbus 3.x (pip3 install pymodbus)
 try:
@@ -90,31 +94,18 @@ TEMP_HISTORY_MAXLEN  = 120         # 120 samples × 10 s = 20 min of history
 TEMP_RISE_WINDOW_S   = 900.0       # 15-minute evaluation window
 TEMP_RISE_THRESH_F   = 1.0         # indoor must rise ≥ 1 °F in window → "keeping up"
 
-# Bridge RPC key prefixes (must match hvac_controller.ino)
-# MCU writes: "o_*" (relay outputs), "i_*" (thermostat inputs)
-# Linux writes: "sf_*" (SensorFlags), "cfg_*" (Config)
-MCU_OUTPUT_KEYS = {
-    "o_hc": "high_cool",
-    "o_lc": "low_cool",
-    "o_hh": "high_heat",
-    "o_rv": "reversing_valve",
-    "o_fn": "fan_on",
-    "o_td": "theater_damper",
-    "o_dd": "downstairs_damper",
-    "o_vo": "vent_open",
-    "o_dh": "dehumidifier_on",
-}
-MCU_INPUT_KEYS = {
-    "i_mlc": "input_main_low_cool",
-    "i_mhc": "input_main_high_cool",
-    "i_mh":  "input_main_heat",
-    "i_tc":  "input_theater_cool",
-    "i_th":  "input_theater_heat",
-    "i_dc":  "input_downstairs_cool",
-    "i_dh":  "input_downstairs_heat",
-    "i_hh":  "input_high_humidity",
-    "i_vi":  "input_vent_in",
-}
+# MCU RPC bitmask field order — must match rpc_get_outputs / rpc_get_inputs
+# in hvac_controller.ino (positional, index 0-8).
+MCU_OUTPUT_FIELDS = [
+    "high_cool", "low_cool", "high_heat", "reversing_valve",
+    "theater_damper", "downstairs_damper", "vent_open", "dehumidifier_on", "fan_on",
+]
+MCU_INPUT_FIELDS = [
+    "input_main_low_cool", "input_main_high_cool", "input_main_heat",
+    "input_theater_cool",  "input_theater_heat",
+    "input_downstairs_cool", "input_downstairs_heat",
+    "input_high_humidity", "input_vent_in",
+]
 
 # ──────────────────────────────────────────────────────────────
 # DEFAULT CONFIG  (overridden by CONFIG_PATH when it exists)
@@ -415,59 +406,72 @@ def compute_sensor_flags(
 
 # ──────────────────────────────────────────────────────────────
 # ARDUINO BRIDGE — MCU STATE READ AND CONFIG/FLAGS PUSH
+# Uses Arduino_RouterBridge RPC calls (not old Yún put/get).
+# Bridge.call() is synchronous: blocks until MCU responds (~1-10 ms).
 # ──────────────────────────────────────────────────────────────
 
-def _bridge_get_bool(bridge: "BridgeClient", key: str) -> Optional[bool]:
-    """Read a single '0'/'1' key from Bridge. Returns None if key absent."""
-    val = bridge.get(key)
-    if val is None:
-        return None
-    # BridgeClient may return bytes or str depending on version
-    s = val.decode() if isinstance(val, (bytes, bytearray)) else str(val)
-    return s.strip() == "1"
-
-
-def read_mcu_state(bridge: "BridgeClient") -> dict:
+def read_mcu_state() -> dict:
     """
-    Read all relay output and thermostat input states from the MCU via Bridge.
+    Read relay output and thermostat input states from the MCU via RPC.
 
-    Returns a dict with human-readable field names (booleans).
-    Missing keys are omitted so the MQTT payload consumer can detect stale data.
+    Calls get_outputs() and get_inputs() on the MCU, which return 9-char
+    bitmask strings ('0'/'1' per channel, order defined by MCU_OUTPUT_FIELDS
+    and MCU_INPUT_FIELDS).  Returns a dict with human-readable field names.
     """
-    result = {}
-    for mcu_key, field_name in {**MCU_OUTPUT_KEYS, **MCU_INPUT_KEYS}.items():
-        val = _bridge_get_bool(bridge, mcu_key)
-        if val is not None:
-            result[field_name] = val
+    if not _bridge_available:
+        return {}
+    try:
+        out_str = _MCUBridge.call("get_outputs") or ""
+        inp_str = _MCUBridge.call("get_inputs")  or ""
+    except Exception as exc:
+        log.warning("MCU Bridge read failed: %s", exc)
+        return {}
+
+    result: dict = {}
+    for i, field in enumerate(MCU_OUTPUT_FIELDS):
+        if i < len(out_str):
+            result[field] = out_str[i] == "1"
+    for i, field in enumerate(MCU_INPUT_FIELDS):
+        if i < len(inp_str):
+            result[field] = inp_str[i] == "1"
     return result
 
 
-def push_sensor_flags_to_mcu(bridge: "BridgeClient", flags: dict) -> None:
+def push_sensor_flags_to_mcu(flags: dict) -> None:
     """
-    Push pre-computed SensorFlags to the MCU Bridge data store.
-    Bridge key names must match handleBridgeCommands() in hvac_controller.ino.
+    Push pre-computed SensorFlags to the MCU via RPC set_flags().
+    Argument order must match rpc_set_flags() in hvac_controller.ino.
     """
-    mapping = {
-        "heatPumpOk":    "sf_hpo",
-        "auxHeatNeeded": "sf_ahn",
-        "tempRisingFast": "sf_trf",
-        "ventOk":        "sf_vok",
-        "ventBlocked":   "sf_vbl",
-    }
-    for flag_name, bridge_key in mapping.items():
-        val = "1" if flags.get(flag_name, False) else "0"
-        bridge.put(bridge_key, val)
+    if not _bridge_available:
+        return
+    try:
+        _MCUBridge.call("set_flags",
+            bool(flags.get("heatPumpOk",    True)),
+            bool(flags.get("auxHeatNeeded", False)),
+            bool(flags.get("tempRisingFast", True)),
+            bool(flags.get("ventOk",        False)),
+            bool(flags.get("ventBlocked",   False)),
+        )
+    except Exception as exc:
+        log.warning("MCU Bridge set_flags failed: %s", exc)
 
 
-def push_config_to_mcu(bridge: "BridgeClient", cfg: dict) -> None:
+def push_config_to_mcu(cfg: dict) -> None:
     """
-    Push all MCU-relevant config fields to the Bridge data store.
-    Bridge key names must match handleBridgeCommands() in hvac_controller.ino.
+    Push MCU-relevant config to the MCU via RPC set_config().
+    Argument order must match rpc_set_config() in hvac_controller.ino.
     """
-    bridge.put("cfg_th",  "1" if cfg.get("theater_enabled", False) else "0")
-    bridge.put("cfg_vph", str(int(cfg.get("vent_minutes_per_hour", 10))))
-    bridge.put("cfg_mo",  "1" if cfg.get("mode_override", "auto") == "off" else "0")
-    bridge.put("cfg_dmm", str(int(cfg.get("dehum_max_minutes", 20))))
+    if not _bridge_available:
+        return
+    try:
+        _MCUBridge.call("set_config",
+            bool(cfg.get("theater_enabled",       False)),
+            int(cfg.get("vent_minutes_per_hour",  10)),
+            cfg.get("mode_override", "auto") == "off",
+            int(cfg.get("dehum_max_minutes",       20)),
+        )
+    except Exception as exc:
+        log.warning("MCU Bridge set_config failed: %s", exc)
 
 # ──────────────────────────────────────────────────────────────
 # PAYLOAD ASSEMBLY
@@ -551,8 +555,7 @@ def validate_setconfig(key: str, value) -> Optional[object]:
     return coerced
 
 
-def handle_command(cfg: dict, bridge: Optional["BridgeClient"],
-                   mqtt_client: mqtt.Client, payload_str: str) -> dict:
+def handle_command(cfg: dict, mqtt_client: mqtt.Client, payload_str: str) -> dict:
     """
     Parse a home/hvac/cmd message, apply changes, persist config, push to MCU,
     and republish home/hvac/config. Returns the (possibly updated) config dict.
@@ -592,8 +595,7 @@ def handle_command(cfg: dict, bridge: Optional["BridgeClient"],
 
     if changed:
         save_config(cfg)
-        if bridge:
-            push_config_to_mcu(bridge, cfg)
+        push_config_to_mcu(cfg)
         config_payload = build_config_payload(cfg)
         mqtt_client.publish(MQTT_CONFIG, json.dumps(config_payload), retain=True, qos=1)
         log.info("Config updated and republished")
@@ -614,16 +616,11 @@ def run() -> None:
     cfg = load_config()
     cfg_lock = threading.Lock()   # protects cfg in on_message callback
 
-    # ── Arduino Bridge client ──────────────────────────────────
-    bridge: Optional[BridgeClient] = None
-    if BridgeClient is not None:
-        try:
-            bridge = BridgeClient()
-            log.info("Arduino Bridge client connected")
-        except Exception as exc:
-            log.error("Bridge client failed to initialise: %s", exc)
+    # ── Arduino Bridge (RouterBridge RPC) ─────────────────────
+    if _bridge_available:
+        log.info("Arduino RouterBridge available — MCU RPC enabled")
     else:
-        log.warning("bridgeclient not available — MCU Bridge reads/writes disabled")
+        log.warning("arduino.app_utils not available — MCU Bridge disabled")
 
     # ── RS485 Modbus client ────────────────────────────────────
     modbus: Optional[ModbusSerialClient] = None
@@ -671,7 +668,7 @@ def run() -> None:
         payload_str = msg.payload.decode(errors="replace")
         log.info("CMD  ← %s", payload_str[:200])
         with cfg_lock:
-            cfg = handle_command(cfg, bridge, client, payload_str)
+            cfg = handle_command(cfg, client, payload_str)
 
     mqtt_client.on_connect    = on_connect
     mqtt_client.on_disconnect = on_disconnect
@@ -685,9 +682,8 @@ def run() -> None:
     mqtt_client.loop_start()   # handles reconnection automatically in a background thread
 
     # Push initial config to MCU before entering the polling loop
-    if bridge:
-        with cfg_lock:
-            push_config_to_mcu(bridge, cfg)
+    with cfg_lock:
+        push_config_to_mcu(cfg)
 
     log.info("Entering polling loop (interval=%d s)", POLL_INTERVAL_S)
 
@@ -715,14 +711,11 @@ def run() -> None:
                 reset_sdm120_energy(modbus, addr)
 
         # ── Read MCU relay outputs + thermostat inputs ─────────
-        if bridge:
-            mcu_state = read_mcu_state(bridge)
-            if mcu_state:
-                payload.update(mcu_state)
-            else:
-                log.warning("MCU Bridge read returned no data")
-        else:
-            log.debug("Bridge unavailable — skipping MCU state read")
+        mcu_state = read_mcu_state()
+        if mcu_state:
+            payload.update(mcu_state)
+        elif _bridge_available:
+            log.warning("MCU Bridge read returned no data")
 
         # ── Read RS485 sensors ─────────────────────────────────
         indoor_temp_f       = None
@@ -756,8 +749,7 @@ def run() -> None:
             indoor_temp_f=indoor_temp_f,
             cfg=cfg_snap,
         )
-        if bridge:
-            push_sensor_flags_to_mcu(bridge, flags)
+        push_sensor_flags_to_mcu(flags)
 
         # ── Derive compound fields ─────────────────────────────
         payload["mode"]         = derive_mode(payload)

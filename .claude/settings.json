@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir *)",
+      "Bash(findstr *)",
+      "mcp__ccd_session_mgmt__search_session_transcripts"
+    ]
+  }
+}

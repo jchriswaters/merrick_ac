@@ -117,21 +117,33 @@ A single 12V DIN-rail PSU is the only external DC supply needed. The Arduino's
 onboard regulator provides 5V and 3.3V from the 12V VIN input. No buck converter
 or AC-DC conversion module is required.
 
+The 12V rail terminates on a DIN-rail terminal block strip inside the enclosure,
+from which all 12V loads draw **in parallel** (star topology from the block):
+
 ```
 AC mains ──► 12V DIN-rail PSU (2A)
+                │
+                ▼
+         ┌─────────────────────────────────┐
+         │ Power-distribution terminal     │
+         │ block strip (12V + GND rails)   │
+         └─────────────────────────────────┘
                 │
                 ├──► Uno Q VIN pin (via shield screw terminal)
                 │      GND ──► Uno Q GND pin
                 │
-                └──► RS485 sensor VCC (via 4-conductor cable to sensor chain)
-                       GND ──► RS485 sensor GND
+                ├──► Powered USB hub DC input (typically 5V via 12V→5V buck,
+                │      or 12V directly if the hub accepts wide input)
+                │
+                └──► RS485 SHT30 sensor power (V+ red, V- green)
+                       via 4-conductor shielded cable to each sensor
 
 Uno Q 5V pin  ──► Output relay board coil VCC   (5V relay coils)
 Uno Q 3.3V pin ──► Output relay board logic VCC  (3.3V MCU logic)
                ──► Input relay contacts (one terminal per relay → MCU input pin)
 
 HVAC 24VAC thermostat signals ──► Input relay coils (directly — no conversion needed)
-SDM120 energy meters ──► powered from AC mains circuits they monitor
+SDM120 energy meters ──► powered from AC mains circuits they monitor (no 12V needed)
 ```
 
 **Key points:**
@@ -143,6 +155,12 @@ SDM120 energy meters ──► powered from AC mains circuits they monitor
   supply for the relay board coil VCC.
 - Input relay contacts are galvanically isolated from 24VAC — 3.3V on the contact
   side is the only voltage that reaches the MCU input pins.
+- **Why the powered USB hub is required:** when the Uno Q runs on VIN (not USB-C
+  bus power), its Type-C port stays in "sink" mode and does not provide VBUS to
+  downstream USB devices. A USB-RS485 dongle plugged directly into the Uno Q
+  will not enumerate. A powered hub between the Uno Q and the dongle supplies
+  VBUS independently (from its own DC adapter / from the enclosure 12V) and
+  resolves this. See `docs/deployment.md` for full background.
 
 ---
 
@@ -158,24 +176,121 @@ via a USB-RS485 adapter. The `bridge_daemon.py` polls all devices and assembles 
 full MQTT payload. The MCU only handles digital I/O (thermostat inputs and relay outputs).
 
 ```
-QRB2210 USB port ──► Waveshare USB-RS485 adapter (/dev/ttyUSB0) ──► RS485 bus (daisy-chain)
+QRB2210 USB-C ──► [powered USB hub] ──► FTDI USB-RS485 adapter (/dev/ttyUSB0)
                                                 │
-                                                ├── SDM120 #1, addr 0x03 (AC system)
-                                                ├── SDM120 #2, addr 0x04 (dehumidifier)
-                                                ├── SHT30 #1,  addr 0x01 (indoor)
-                                                └── SHT30 #2,  addr 0x02 (outdoor) ──► 120Ω
+                                                ▼
+                                     RS485 distribution terminal block
+                                     (A+ row / B- row / GND row in parallel)
+                                                │
+                ┌───────────────────────────────┼───────────────────────────────┐
+                │                               │                               │
+                ▼                               ▼                               ▼
+       SDM120 #1, addr 0x03      SDM120 #2, addr 0x04      Outdoor cable run
+       (AC system)               (dehumidifier)            │                  │
+       (in enclosure)            (in enclosure)            ▼                  ▼
+                                                    SHT30 indoor,        SHT30 outdoor,
+                                                    addr 0x01            addr 0x02 ──► 120Ω
+                                                    (mid-bus)            (end of bus)
 ```
 
-**Recommended daisy-chain order:** Start at the USB-RS485 adapter, wire through the
-SDM120 energy meters (DIN-rail mounted in the enclosure), then exit the enclosure and
-continue to the indoor then outdoor SHT30 sensor. Terminate with a 120Ω resistor
-across A and B at the outdoor sensor (far end of the bus).
+### 4a. Bus topology — parallel distribution from terminal block
 
-**Cable:** 4-conductor, 22 AWG unshielded twisted pair — fine for a 4m run at 9600 baud.
-Use the twisted pair for RS485 A/B. The other two conductors carry 12V and GND for
-SHT30 sensor power only. SDM120 meters are self-powered from AC mains.
+For convenience and ease of maintenance, all four devices connect in **parallel**
+to a 3-row screw-terminal block inside the enclosure (one row for A+, one for B-,
+one for GND reference). This is technically a star topology rather than a strict
+daisy chain. For the < 10 m total cable length in this installation, signal-integrity
+issues are not observed at 9600 baud. If a future installation has long runs
+(say > 30 m total), revert to a strict daisy-chain layout.
 
-**Devices on this bus:**
+The **outdoor SHT30 sensor terminates the bus** with a 120 Ω resistor wired across
+its A+ and B- terminals. No other termination is fitted (RS485 specifies termination
+only at the two ends of the longest electrical path).
+
+### 4b. Wire color reference — SHT30 RS485 transmitter
+
+The SHT30-based RS485 transmitters used in this build ship with a 4-conductor
+flying lead in the following color convention. **Always verify against the
+specific module's datasheet before final connection** — Chinese OEMs sometimes
+swap colors between batches:
+
+| Wire color | Function                | Connect to (in enclosure)          |
+|------------|-------------------------|------------------------------------|
+| **Red**    | V+ (12 V DC supply)     | +12 V row on power terminal block  |
+| **Green**  | V- (DC return / ground) | GND row on power terminal block    |
+| **Yellow** | A+ (RS485 data positive)| A+ row on RS485 terminal block     |
+| **Blue**   | B- (RS485 data negative)| B- row on RS485 terminal block     |
+
+A single 4-conductor shielded cable run carries all four signals to each sensor.
+The cable shield drain wire is bonded to enclosure GND **at the controller end only**
+(single-point ground — prevents ground loops).
+
+### 4c. Wiring diagram — enclosure side
+
+Inside the enclosure, the 12V power distribution and the RS485 bus distribution
+are two separate terminal blocks fed in parallel:
+
+```
+                          ┌─── ENCLOSURE ────────────────────────────────────┐
+                          │                                                  │
+   AC mains ──► 12V PSU ──┼──► +12V row ─────┬──┬──┬──┬──┬──────────────────│──► to indoor SHT30  Red (V+)
+                          │                  │  │  │  │  │                   │──► to outdoor SHT30 Red (V+)
+                          │  GND      ──────┴┐ │  │  │  │                   │
+                          │                  │ │  │  │  │                   │
+                          │  GND row  ───────┼─┴──┼──┼──┼───────────────────│──► to indoor SHT30  Green (V-)
+                          │                  │    │  │  │                   │──► to outdoor SHT30 Green (V-)
+                          │                  │    │  │  │                   │
+                          │                  ▼    ▼  ▼  ▼                   │
+                          │            ┌─────────────────┐                  │
+                          │            │ Uno Q + shield  │                  │
+                          │            │ (VIN = +12V)    │                  │
+                          │            └────────┬────────┘                  │
+                          │                     │ USB-C                     │
+                          │                     ▼                           │
+                          │            ┌─────────────────┐                  │
+                          │            │ Powered USB hub │ ◄── 5V from buck │
+                          │            │ (provides VBUS) │     or 12V       │
+                          │            └────────┬────────┘                  │
+                          │                     │ USB-A                     │
+                          │                     ▼                           │
+                          │            ┌─────────────────┐                  │
+                          │            │ FTDI USB-RS485  │                  │
+                          │            │ (/dev/ttyUSB0)  │                  │
+                          │            └─┬─────┬─────┬───┘                  │
+                          │              │A+   │B-   │GND                   │
+                          │              ▼     ▼     ▼                      │
+                          │       ┌──────────────────────────┐              │
+                          │       │ RS485 distribution block │              │
+                          │       │   A+ row ──┬──┬──┬──┬──  │              │
+                          │       │   B- row ──┼──┼──┼──┼──  │              │
+                          │       │   GND row ─┴──┴──┴──┴──  │              │
+                          │       └────┬───┬───┬───┬─────────┘              │
+                          │            │   │   │   │                        │
+                          │            ▼   ▼   ▼   ▼                        │
+                          │       SDM120 SDM120 (to (to                     │
+                          │        #1     #2   indoor outdoor               │
+                          │       (0x03) (0x04) cable) cable)                │
+                          │       (A,B   (A,B                                │
+                          │       only)  only)                               │
+                          │                                                  │
+                          └──────────────────────────────────────────────────┘
+                                                          │            │
+                                                          ▼            ▼
+                                                  ┌──────────────┐ ┌──────────────────┐
+                                                  │ SHT30 INDOOR │ │ SHT30 OUTDOOR    │
+                                                  │ addr 0x01    │ │ addr 0x02        │
+                                                  │              │ │ (end of bus)     │
+                                                  │ Red    ──V+  │ │ Red    ──V+      │
+                                                  │ Green  ──V-  │ │ Green  ──V-      │
+                                                  │ Yellow ──A+  │ │ Yellow ──A+ ─┐   │
+                                                  │ Blue   ──B-  │ │ Blue   ──B- ─┤   │
+                                                  │              │ │              │   │
+                                                  │ (mid-bus,    │ │   ┌─ 120 Ω ──┘   │
+                                                  │  no term.)   │ │   │ termination  │
+                                                  └──────────────┘ │   └──────────────│
+                                                                   └──────────────────┘
+```
+
+### 4d. Devices on this bus
 
 | Device | Modbus Addr | Address set by | Location / Notes |
 |--------|-------------|----------------|------------------|
@@ -187,7 +302,9 @@ SHT30 sensor power only. SDM120 meters are self-powered from AC mains.
 **SDM120 wiring (per unit):**
 - **L + N terminals:** connected to the AC mains circuit being monitored (powers the meter)
 - **CT clamp:** clamped around the **live wire only** of the circuit being monitored
-- **RS485 A/B terminals:** daisy-chained on the bus
+- **RS485 A / B terminals:** wired in parallel to the A+ and B- rows of the RS485
+  distribution block — note no 12 V wiring (the meter is AC-powered from the circuit
+  it monitors).
 - Ships with default address 0x01 — reprogram to 0x03 / 0x04 via front panel before
   installation (hold setup button to enter address programming mode)
 
@@ -198,7 +315,22 @@ SHT30 sensor power only. SDM120 meters are self-powered from AC mains.
 **SHT30 sensor notes:**
 - Factory calibrated. No user calibration required.
 - Address set by physical DIP switch — set *before* installing.
-- Each transmitter provides: temperature (°F), relative humidity (%RH), dew point (°F).
+- Each transmitter provides: temperature (°F), relative humidity (%RH), and a
+  status/flags register. The bridge daemon reads only the first two data registers
+  (offset 0x0000, count 2); the third register is a status byte, not dew point.
+- Confirmed register map (verified against hardware 2026-05-25):
+  - Register 0 — temperature × 100, signed int16, units 0.01 °C
+  - Register 1 — humidity × 100, unsigned int16, units 0.01 %RH
+- **Common ground:** all four sensors share a common reference ground with the
+  USB-RS485 adapter. The GND row on the RS485 distribution block connects to
+  enclosure GND, which connects to the FTDI adapter's GND terminal. Floating
+  RS485 grounds cause intermittent CRC failures.
+
+**Cable:** 4-conductor, 22 AWG **shielded** twisted pair — fine for the indoor
+and outdoor sensor runs (~4 m each at 9600 baud). Twist the A+ / B- pair tightly
+to reject common-mode noise. The V+ / V- pair can share the same cable. Bond the
+cable shield to enclosure GND **at the enclosure end only** (drain wire one end,
+clipped at the sensor end) to avoid ground loops.
 
 ---
 
