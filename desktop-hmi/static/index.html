@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HVAC HMI</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">⚙</span>
+      <span>HVAC Controller HMI</span>
+    </div>
+    <div class="connection" id="connection">
+      <span class="led" id="led"></span>
+      <span id="connection-text">Connecting…</span>
+      <span class="host" id="host"></span>
+    </div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-card">
+      <div class="hero-label">Current Mode</div>
+      <div class="hero-value" id="mode">—</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Compressor</div>
+      <div class="hero-value" id="compressor">—</div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Indoor</div>
+      <div class="hero-value">
+        <span id="indoor-temp">—</span><span class="unit">°F</span>
+        <span class="hero-sub" id="indoor-hum">— %RH</span>
+      </div>
+    </div>
+    <div class="hero-card">
+      <div class="hero-label">Outdoor</div>
+      <div class="hero-value">
+        <span id="outdoor-temp">—</span><span class="unit">°F</span>
+        <span class="hero-sub" id="outdoor-hum">— %RH</span>
+      </div>
+    </div>
+    <div class="hero-card power">
+      <div class="hero-label">AC Power</div>
+      <div class="hero-value">
+        <span id="ac-power">—</span><span class="unit">W</span>
+        <span class="hero-sub"><span id="ac-current">—</span> A @ <span id="ac-voltage">—</span> V</span>
+      </div>
+    </div>
+  </section>
+
+  <main class="panels">
+    <section class="panel">
+      <h2 class="panel-title">
+        <span>Thermostat Inputs</span>
+        <span class="panel-sub">D2–D10 · active when HIGH</span>
+      </h2>
+      <div class="grid" id="inputs-grid"></div>
+    </section>
+
+    <section class="panel">
+      <h2 class="panel-title">
+        <span>HVAC Outputs</span>
+        <span class="panel-sub">D11–D19 · active when energized</span>
+      </h2>
+      <div class="grid" id="outputs-grid"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span id="last-update">Waiting for first poll…</span>
+    <span class="footer-spacer"></span>
+    <span class="footer-meta">
+      Phase 1 — read-only.  Input simulation coming in Phase 2.
+    </span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
