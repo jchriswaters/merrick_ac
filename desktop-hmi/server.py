@@ -346,6 +346,37 @@ def parse_bitmask(s: str, fields: list[tuple[str, str, str]]) -> dict[str, bool]
     return out
 
 
+def parse_override(s: str, fields: list[tuple[str, str, str]]) -> dict[str, str]:
+    """Convert the get_input_override 9-char string to {name: mode}.
+
+    Each char: '-' = auto (live hardware), '1' = forced ON, '0' = forced OFF.
+    """
+    mode_map = {"-": "auto", "1": "on", "0": "off"}
+    out = {}
+    for i, (key, _, _) in enumerate(fields):
+        ch = s[i] if isinstance(s, str) and i < len(s) else "-"
+        out[key] = mode_map.get(ch, "auto")
+    return out
+
+
+def override_to_mask_value(override: dict[str, str]) -> tuple[int, int]:
+    """Build the (mask, value) ints the MCU expects from a {key: mode} dict.
+
+    mask bit set  = that input is overridden (ignores hardware)
+    value bit set = forced state when overridden
+    """
+    mask = 0
+    value = 0
+    for i, (key, _, _) in enumerate(INPUTS):
+        mode = override.get(key, "auto")
+        if mode == "on":
+            mask |= (1 << i)
+            value |= (1 << i)
+        elif mode == "off":
+            mask |= (1 << i)
+    return mask, value
+
+
 async def collect_status(session: ControllerSession) -> dict:
     """Poll the controller for a complete status snapshot."""
     snapshot = {
@@ -355,16 +386,19 @@ async def collect_status(session: ControllerSession) -> dict:
         "last_error": session.last_error,
         "outputs": {key: None for key, _, _ in OUTPUTS},
         "inputs":  {key: None for key, _, _ in INPUTS},
+        "input_override": {key: "auto" for key, _, _ in INPUTS},
+        "sim_active": False,
         "sensors": None,
         "mode": None,
         "compressor_on": None,
     }
 
-    # Outputs + inputs via batched RPC (one SSH round trip), and the
-    # MQTT retained status in parallel.
+    # Outputs + inputs + override state via batched RPC (one SSH round
+    # trip), and the MQTT retained status in parallel.
     rpc_task = asyncio.create_task(session.rpc_batch([
-        ("get_outputs", []),
-        ("get_inputs",  []),
+        ("get_outputs",        []),
+        ("get_inputs",         []),
+        ("get_input_override", []),
     ]))
     mqtt_task = asyncio.create_task(session.mqtt_status(timeout=2.0))
 
@@ -378,6 +412,7 @@ async def collect_status(session: ControllerSession) -> dict:
 
     out_val = _result(rpc_resp.get("get_outputs"))
     in_val  = _result(rpc_resp.get("get_inputs"))
+    ovr_val = _result(rpc_resp.get("get_input_override"))
 
     if out_val is not None or in_val is not None:
         snapshot["connected"] = True
@@ -386,6 +421,10 @@ async def collect_status(session: ControllerSession) -> dict:
         snapshot["outputs"] = parse_bitmask(out_val, OUTPUTS)
     if isinstance(in_val, str):
         snapshot["inputs"] = parse_bitmask(in_val, INPUTS)
+    if isinstance(ovr_val, str):
+        ovr = parse_override(ovr_val, INPUTS)
+        snapshot["input_override"] = ovr
+        snapshot["sim_active"] = any(v != "auto" for v in ovr.values())
 
     # Sensors + derived fields from MQTT retained status
     mqtt = await mqtt_task
@@ -496,20 +535,71 @@ async def api_metadata():
     }
 
 
+async def apply_override_command(cmd: dict) -> dict:
+    """Handle an input-simulation command from the UI.
+
+    Accepts:
+      {"type": "override", "key": "<input_key>", "mode": "auto"|"on"|"off"}
+      {"type": "clear_overrides"}
+
+    Reads the current override state, applies the change, and pushes the
+    new (mask, value) to the MCU via set_input_override.  Returns the
+    fresh snapshot (also broadcast to all clients).
+    """
+    latest = HUB.latest or {}
+    current = dict(latest.get("input_override") or {})
+
+    if cmd.get("type") == "clear_overrides":
+        mask, value = 0, 0
+    else:
+        key = cmd.get("key")
+        mode = cmd.get("mode", "auto")
+        if key not in {k for k, _, _ in INPUTS}:
+            return {"error": f"unknown input key {key!r}"}
+        if mode not in ("auto", "on", "off"):
+            return {"error": f"invalid mode {mode!r}"}
+        current[key] = mode
+        mask, value = override_to_mask_value(current)
+
+    resp = await SESSION.rpc("set_input_override", [mask, value])
+    ok = isinstance(resp, list) and len(resp) >= 4 and resp[2] is None
+
+    # Re-poll immediately so the UI reflects the change without waiting
+    # for the next periodic cycle.
+    snap = await collect_status(SESSION)
+    await HUB.broadcast(snap)
+    return {"ok": ok, "mask": mask, "value": value}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     await HUB.add(ws)
     try:
         while True:
-            # Keep the connection alive; we never expect inbound messages
-            # (Phase 2 will use this for input simulation commands)
             msg = await ws.receive_text()
-            log.debug("ws msg: %s", msg)
+            try:
+                cmd = json.loads(msg)
+            except Exception:
+                continue
+            if cmd.get("type") in ("override", "clear_overrides"):
+                result = await apply_override_command(cmd)
+                try:
+                    await ws.send_json({"type": "ack", **result})
+                except Exception:
+                    pass
+            else:
+                log.debug("ws msg (ignored): %s", msg)
     except WebSocketDisconnect:
         pass
     finally:
         await HUB.remove(ws)
+
+
+@app.post("/api/override")
+async def api_override(cmd: dict):
+    """REST fallback for input simulation (same payload as the WS command)."""
+    return await apply_override_command(cmd)
 
 
 if __name__ == "__main__":

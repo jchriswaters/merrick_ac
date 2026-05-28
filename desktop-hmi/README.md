@@ -92,21 +92,46 @@ Every poll cycle:
 
 If the SSH connection drops, the next poll reconnects automatically.
 
-## Phase 2 — input simulation (future)
+## Input simulation (implemented)
 
-The WebSocket already accepts inbound messages (currently logged and
-ignored).  To add input simulation:
+Each input card has an **AUTO / FORCE ON / FORCE OFF** control. This lets
+you simulate thermostat calls without physically triggering a thermostat,
+to test the control logic:
 
-1. Add an MCU-side RPC method (e.g. `set_input_override(bitmask,
-   force_value_mask)`) that overrides physical pin reads.
-2. Render a small toggle on each input card in the UI.
-3. On toggle, send `{type: "override", key: "input_main_low_cool",
-   force: true}` over the WebSocket.
-4. Server handler calls the new RPC.
+- **AUTO** — the input reads the live hardware pin (normal operation).
+- **FORCE ON / FORCE OFF** — the MCU ignores the hardware pin and uses
+  the forced value instead.
 
-The CSS already has `.iocard` styling that will work as a clickable
-button — the framework is wired up, just the MCU-side RPC and the
-toggle UI are missing.
+When any input is forced, an amber **SIMULATION MODE** banner appears at
+the top with a **Return all inputs to AUTO** button.
+
+**This drives real equipment.**  A forced input flows through the same
+`runZoneLogic()` on the MCU as a real thermostat call — so forcing "Main
+Y1" actually engages the compressor's low-cool relay.  All firmware
+safety interlocks still apply (3-minute compressor lockout, heat/cool
+mutual exclusion), so simulation cannot violate equipment protection.
+The override state is volatile — it clears on MCU reset/power-cycle.
+
+### How it works
+
+- MCU RPC `set_input_override(mask, value)` — `mask` bit i = override
+  input i; `value` bit i = forced state.  `(0, 0)` clears all.
+- MCU RPC `get_input_override()` → 9-char string (`-`=auto, `1`=on,
+  `0`=off), polled each cycle so the UI stays in sync even if another
+  client changes it.
+- The browser sends `{type:"override", key, mode}` or
+  `{type:"clear_overrides"}` over the WebSocket; the server reads the
+  current override state, applies the one change, computes the new
+  `(mask, value)`, and calls `set_input_override`.
+- A REST fallback exists at `POST /api/override` with the same payload.
+
+## Staleness indicator
+
+Sensor cards (indoor / outdoor / AC power) come from the bridge daemon's
+MQTT status, which only refreshes every ~10 s.  If that data is more than
+30 s old (e.g. an MQTT hiccup or the bridge stalling), the affected cards
+dim and show a **STALE** tag — so a frozen number is never mistaken for a
+live-but-unchanged one.
 
 ## Troubleshooting
 

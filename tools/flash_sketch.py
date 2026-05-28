@@ -4,11 +4,11 @@ Flash a compiled sketch to the Arduino Uno Q over SSH+SWD.
 CRITICAL: Use the .elf-zsk.bin file (the ELF), NOT the .bin-zsk.bin (raw).
 The Zephyr LLEXT loader at the bootloader stage validates the ELF magic
 (\\x7fELF) at flash address 0x8100000.  If you flash the raw .bin-zsk.bin
-(which starts with \\x00\\x00\\x00\\x00 — a custom Arduino header, not ELF),
+(which starts with \\x00\\x00\\x00\\x00 - a custom Arduino header, not ELF),
 the loader silently rejects it and your sketch never runs.
 
 The on-board /opt/openocd/bin/arduino-flash.sh script is BROKEN for this
-board — it writes to 0x80F0000 (wrong address) and misses the magic write
+board - it writes to 0x80F0000 (wrong address) and misses the magic write
 to TAMP_CR1.  This script implements the correct procedure from the
 Arduino package's variant flash_sketch.cfg.
 
@@ -17,11 +17,40 @@ Usage:
 
 If no path given, uses the most recent build output in tools/build/.
 """
-import paramiko, sys, os, time
+import paramiko, sys, os, time, json
 
-HOST = "192.168.1.195"
+# Host/credentials resolution order:
+#   1. --host <ip>  (or HVAC_HOST env var)
+#   2. desktop-hmi/config.json  (controller_host / _user / _password)
+#   3. the hardcoded fallback below
+HOST = "192.168.1.197"
 USER = "arduino"
 PASS = "piragua827"
+
+def _load_from_hmi_config():
+    global HOST, USER, PASS
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..", "desktop-hmi", "config.json"
+    )
+    try:
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        HOST = cfg.get("controller_host", HOST)
+        USER = cfg.get("controller_user", USER)
+        PASS = cfg.get("controller_password", PASS)
+    except Exception:
+        pass
+
+_load_from_hmi_config()
+if os.environ.get("HVAC_HOST"):
+    HOST = os.environ["HVAC_HOST"]
+# allow:  python flash_sketch.py [bin] --host 192.168.1.x
+if "--host" in sys.argv:
+    i = sys.argv.index("--host")
+    if i + 1 < len(sys.argv):
+        HOST = sys.argv[i + 1]
+        del sys.argv[i:i+2]
 
 # Default build output (adjust if your build_path differs)
 DEFAULT_BIN = os.path.join(
@@ -39,7 +68,7 @@ def main():
         print(f"ERROR: file not found: {local_bin}")
         sys.exit(1)
     if not local_bin.endswith(".elf-zsk.bin"):
-        print(f"WARNING: file does not end in .elf-zsk.bin — wrong format will silently fail to boot")
+        print(f"WARNING: file does not end in .elf-zsk.bin - wrong format will silently fail to boot")
 
     # Verify ELF magic
     with open(local_bin, "rb") as f:
@@ -71,7 +100,7 @@ def main():
     #   2. Erase + write the ELF as raw bytes to 0x8100000
     #   3. Reset and let it run briefly
     #   4. Write magic 0xCAFFEEEE to TAMP_CR1 (0x40036400)
-    #      — this tells the Zephyr core to boot the new sketch
+    #      - this tells the Zephyr core to boot the new sketch
     #   5. Shutdown (releases SRST, MCU boots and loads the LLEXT)
     flash_cfg = f"""reset_config srst_only srst_nogate srst_push_pull connect_assert_srst
 init
@@ -99,7 +128,7 @@ shutdown
         if any(k in line for k in ["Error", "Warn", "wrote", "erased", "shutdown", "Padding"]):
             print("  " + line)
 
-    # Restart router — its ExecStartPre asserts SRST, after-ready releases.
+    # Restart router - its ExecStartPre asserts SRST, after-ready releases.
     # That triggers a final MCU reset, at which point Zephyr sees the magic
     # in TAMP_CR1 and loads our sketch.
     print("\nRestarting arduino-router (triggers final MCU reset)...")
@@ -139,14 +168,14 @@ for m in ["get_outputs", "get_inputs", "set_flags", "set_config"]:
     print(out)
 
     if "method get_outputs not available" in out:
-        print("\n!!! FLASH MAY HAVE FAILED — methods not registered !!!")
+        print("\n!!! FLASH MAY HAVE FAILED - methods not registered !!!")
         print("Check that:")
         print("  1. You used .elf-zsk.bin (NOT .bin-zsk.bin)")
         print("  2. The TAMP magic write completed")
         print("  3. The router's GPIO reset timing is correct in /var/lib/arduino-router/config/10-imola.conf")
         sys.exit(1)
     else:
-        print("\n✓ Flash successful — MCU is running the new sketch.")
+        print("\n[OK] Flash successful - MCU is running the new sketch.")
 
     c.close()
 

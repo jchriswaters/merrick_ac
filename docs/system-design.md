@@ -82,18 +82,26 @@ LOW when not calling. This is the opposite of the original optocoupler design.
 All outputs drive one channel of an **8-channel 5V optocoupler relay board**.
 The relay contacts switch 24 VAC control circuits for the HVAC equipment.
 
-| MCU Pin | Signal Name           | Load controlled              | Notes                          |
-|---------|-----------------------|------------------------------|--------------------------------|
-| D11     | high_cool             | Unico Y2 — high-stage cool   | Relay NC → NO when active      |
-| D12     | low_cool              | Unico Y1 — low-stage cool    |                                |
-| D13     | high_heat             | Unico W / W2 — heat stage    |                                |
-| D14     | reversing_valve       | Unico O/B — heat pump rev.   | B-type: energize in HEAT mode  |
-|         |                       |                               | (OFF during cooling, ON during heating) |
-| D15     | theater_damper_open   | Theater zone powered damper  |                                |
-| D16     | downstairs_damper_open| Downstairs zone powered damper|                               |
-| D17     | vent_open_out         | Fresh-air vent actuator       |                                |
-| D18     | dehumidifier_on       | Dehumidifier relay            |                                |
-| D19     | fan_on                | Unico air handler G wire      | Fan-only mode (no cooling/heat)|
+> **Pin numbering ⚠️:** the sketch uses Arduino digital pin *numbers* 11–19.
+> On the Uno Q (confirmed from the board's device-tree `digital-pin-gpios`
+> array), the analog header pins continue the digital numbering, so pins
+> 14–19 are physically the **A0–A5** screw terminals on the shield:
+> **D14 = A0, D15 = A1, D16 = A2, D17 = A3, D18 = A4, D19 = A5.**
+> Wire the last six outputs to the A0–A5 header, not to a "D14–D19" header
+> (there isn't one).
+
+| MCU Pin | Shield pin | Signal Name           | Load controlled              | Notes                          |
+|---------|-----------|-----------------------|------------------------------|--------------------------------|
+| D11     | D11       | high_cool             | Unico Y2 — high-stage cool   | Relay NC → NO when active      |
+| D12     | D12       | low_cool              | Unico Y1 — low-stage cool    |                                |
+| D13     | D13       | high_heat             | Unico W / W2 — heat stage    |                                |
+| D14     | **A0**    | reversing_valve       | Unico O/B — heat pump rev.   | B-type: energize in HEAT mode  |
+|         |           |                       |                               | (OFF during cooling, ON during heating) |
+| D15     | **A1**    | theater_damper_open   | Theater zone powered damper  |                                |
+| D16     | **A2**    | downstairs_damper_open| Downstairs zone powered damper|                               |
+| D17     | **A3**    | vent_open_out         | Fresh-air vent actuator       |                                |
+| D18     | **A4**    | dehumidifier_on       | Dehumidifier relay            |                                |
+| D19     | **A5**    | fan_on                | Unico air handler G wire      | Fan-only mode (no cooling/heat)|
 
 **Relay board wiring note:** Use a board with a VCC/VDD jumper that separates relay
 coil power from the logic input. Connect logic input VCC to the Arduino **3.3V pin**;
