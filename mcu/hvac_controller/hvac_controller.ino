@@ -153,6 +153,20 @@ bool          dehumTimedOut = false;
 // so the vent opens for cfg.ventMinPerHour minutes each hour.
 unsigned long ventHourStartMs = 0;
 
+// ── Input override (HMI simulation) ─────────────────────────────
+// Lets the desktop HMI force thermostat inputs on/off for testing,
+// without physically triggering a thermostat.  Bit order matches the
+// get_inputs bitmask (index 0-8):
+//   0 mainLowCool 1 mainHighCool 2 mainHeat 3 theaterCool 4 theaterHeat
+//   5 downCool 6 downHeat 7 highHumidity 8 ventIn
+//   inputOverrideMask  bit i = 1 → input i is forced (ignores hardware)
+//   inputOverrideValue bit i     → forced state for input i
+// Volatile: cleared on MCU reset/power cycle.  Overridden inputs still
+// pass through runZoneLogic(), so all equipment safety interlocks
+// (compressor 3-min lockout, heat/cool mutual exclusion) remain enforced.
+uint16_t inputOverrideMask  = 0;
+uint16_t inputOverrideValue = 0;
+
 // ─────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────
@@ -181,15 +195,38 @@ bool checkVentTimer() {
 // ─────────────────────────────────────────────────────────────
 
 void readDigitalInputs() {
-  inp.mainLowCool  = (digitalRead(PIN_MAIN_LOW_COOL)    == HIGH);
-  inp.mainHighCool = (digitalRead(PIN_MAIN_HIGH_COOL)   == HIGH);
-  inp.mainHeat     = (digitalRead(PIN_MAIN_HEAT)        == HIGH);
-  inp.theaterCool  = (digitalRead(PIN_THEATER_COOL)     == HIGH);
-  inp.theaterHeat  = (digitalRead(PIN_THEATER_HEAT)     == HIGH);
-  inp.downCool     = (digitalRead(PIN_DOWNSTAIRS_COOL)  == HIGH);
-  inp.downHeat     = (digitalRead(PIN_DOWNSTAIRS_HEAT)  == HIGH);
-  inp.highHumidity = (digitalRead(PIN_HIGH_HUMIDITY)    == HIGH);
-  inp.ventIn       = (digitalRead(PIN_VENT_IN)          == HIGH);
+  // Read the physical pins (active-HIGH).
+  bool phys[9];
+  phys[0] = (digitalRead(PIN_MAIN_LOW_COOL)    == HIGH);
+  phys[1] = (digitalRead(PIN_MAIN_HIGH_COOL)   == HIGH);
+  phys[2] = (digitalRead(PIN_MAIN_HEAT)        == HIGH);
+  phys[3] = (digitalRead(PIN_THEATER_COOL)     == HIGH);
+  phys[4] = (digitalRead(PIN_THEATER_HEAT)     == HIGH);
+  phys[5] = (digitalRead(PIN_DOWNSTAIRS_COOL)  == HIGH);
+  phys[6] = (digitalRead(PIN_DOWNSTAIRS_HEAT)  == HIGH);
+  phys[7] = (digitalRead(PIN_HIGH_HUMIDITY)    == HIGH);
+  phys[8] = (digitalRead(PIN_VENT_IN)          == HIGH);
+
+  // Apply HMI overrides: where a mask bit is set, substitute the forced
+  // value; otherwise use the live hardware reading.
+  bool eff[9];
+  for (int i = 0; i < 9; i++) {
+    if (inputOverrideMask & (1u << i)) {
+      eff[i] = ((inputOverrideValue >> i) & 1u) != 0;
+    } else {
+      eff[i] = phys[i];
+    }
+  }
+
+  inp.mainLowCool  = eff[0];
+  inp.mainHighCool = eff[1];
+  inp.mainHeat     = eff[2];
+  inp.theaterCool  = eff[3];
+  inp.theaterHeat  = eff[4];
+  inp.downCool     = eff[5];
+  inp.downHeat     = eff[6];
+  inp.highHumidity = eff[7];
+  inp.ventIn       = eff[8];
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -501,6 +538,32 @@ static bool rpc_set_config(bool te, int vph, bool mo, int dmm) {
   return true;
 }
 
+// HMI calls set_input_override(mask, value) → force thermostat inputs.
+//   mask:  bit i = 1 means input i is overridden (ignores hardware pin)
+//   value: bit i     forced state for input i when overridden
+// Bit order matches get_inputs (index 0-8).  Call (0, 0) to clear all
+// overrides and return every input to live hardware.
+static bool rpc_set_input_override(int mask, int value) {
+  inputOverrideMask  = (uint16_t)(mask  & 0x1FF);   // 9 valid bits
+  inputOverrideValue = (uint16_t)(value & 0x1FF);
+  return true;
+}
+
+// HMI calls get_input_override() → 9-char string, one char per input:
+//   '-' = auto (live hardware), '1' = forced ON, '0' = forced OFF
+static String rpc_get_input_override() {
+  char buf[10];
+  for (int i = 0; i < 9; i++) {
+    if (inputOverrideMask & (1u << i)) {
+      buf[i] = ((inputOverrideValue >> i) & 1u) ? '1' : '0';
+    } else {
+      buf[i] = '-';
+    }
+  }
+  buf[9] = '\0';
+  return String(buf);
+}
+
 // ─────────────────────────────────────────────────────────────
 // LED MATRIX DIAGNOSTICS
 //
@@ -717,6 +780,8 @@ void setup() {
   Bridge.provide_safe("get_inputs",  rpc_get_inputs);
   Bridge.provide_safe("set_flags",   rpc_set_flags);
   Bridge.provide_safe("set_config",  rpc_set_config);
+  Bridge.provide_safe("set_input_override", rpc_set_input_override);
+  Bridge.provide_safe("get_input_override", rpc_get_input_override);
 
   Serial.println(F("[HVAC] Controller ready"));
 }

@@ -53,12 +53,18 @@ codebase or pasting a transcript.
 - MQTT publishing to `home/hvac/status`.
 - Desktop HMI app (`desktop-hmi/`) shows live inputs/outputs/sensors.
 
+- Desktop HMI **input simulation** (Phase 2) — DONE.  AUTO / FORCE ON /
+  FORCE OFF per input card; verified forcing Main Y1 engages low_cool and
+  adding the humidistat switches to high_cool.  MCU RPCs
+  `set_input_override` / `get_input_override` added.
+- Desktop HMI **staleness indicator** on sensor cards — DONE.
+
 **Pending / not yet verified:**
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not
   yet returning data.
 - SDM120 dehumidifier meter (0x04) — same.
-- Static DHCP lease for the controller (see above).
-- Desktop HMI Phase 2: manual input simulation (toggle inputs from the UI).
+- Static DHCP lease for the controller (see above).  Controller WiFi MAC
+  is `14:b5:cd:ea:d3:31`; last seen at 192.168.1.197.
 - `web_config.py` Flask config API — present in repo, deployment/runtime
   status on the board not re-verified this cycle.
 - HMI CrowPanel ESP32 (`hmi/crowpanel_hvac/`) — not deployed/verified.
@@ -95,10 +101,19 @@ cost real debugging time to discover.  Detail in `docs/deployment.md`.
    `AllowStreamLocalForwarding=no`, so Unix-socket SSH tunneling fails;
    `exec_command python3 /tmp/hmi_rpc.py` works unmodified.
 
-6. **Bitmask field order matters** — `get_outputs` / `get_inputs` return a
-   9-char string; index order must match the MCU sketch and is duplicated
-   in `linux/bridge_daemon.py` and `desktop-hmi/server.py`.  If you add/
-   reorder I/O, update all three.
+6. **Bitmask field order matters** — `get_outputs` / `get_inputs` /
+   `get_input_override` return a 9-char string; index order must match the
+   MCU sketch and is duplicated in `linux/bridge_daemon.py` and
+   `desktop-hmi/server.py`.  If you add/reorder I/O, update all three.
+
+7. **Output pins 14–19 are the A0–A5 header** on the Uno Q shield, not a
+   "D14–D19" header.  D14=A0, D15=A1, … D19=A5.  (Confirmed from the
+   board device-tree `digital-pin-gpios` array.)
+
+8. **Input simulation drives real equipment.**  `set_input_override`
+   forces inputs through the same control logic as real thermostat calls,
+   so a forced cool call energizes the compressor.  Safety interlocks
+   still apply.  Override state is volatile (cleared on MCU reset).
 
 ---
 
