@@ -77,8 +77,9 @@ html, body {
   box-shadow: 0 0 0 0 transparent;
   transition: all 0.3s;
 }
-.led.on  { background: var(--on);  box-shadow: 0 0 8px var(--on-glow); }
-.led.bad { background: var(--bad); box-shadow: 0 0 8px var(--bad-glow); animation: pulse 1.5s infinite; }
+.led.on   { background: var(--on);   box-shadow: 0 0 8px var(--on-glow); }
+.led.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn-bg); animation: pulse 1.5s infinite; }
+.led.bad  { background: var(--bad);  box-shadow: 0 0 8px var(--bad-glow); animation: pulse 1.5s infinite; }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.5; }

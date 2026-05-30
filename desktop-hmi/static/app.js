@@ -258,10 +258,21 @@
   }
 
   function setConnection(state, snap) {
-    led.classList.remove("on", "bad");
+    led.classList.remove("on", "bad", "warn");
     if (state === "connected") {
-      led.classList.add("on");
-      connText.textContent = "Connected";
+      // Connected — but is the MCU healthy?  Bridge publishes mcu_healthy
+      // every cycle; if it's flipped to false the controller is up but
+      // the MCU has gone silent (likely needs a router restart / SRST).
+      if (snap && snap.mcu_healthy === false) {
+        led.classList.add("warn");
+        const sil = snap.mcu_silence_s;
+        connText.textContent = sil != null
+          ? `MCU unresponsive (${Math.round(sil)} s)`
+          : "MCU unresponsive";
+      } else {
+        led.classList.add("on");
+        connText.textContent = "Connected";
+      }
     } else if (state === "controller-down") {
       led.classList.add("bad");
       connText.textContent = "Controller unreachable";

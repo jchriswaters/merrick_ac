@@ -65,13 +65,16 @@ const uint8_t PIN_FAN               = 19;  // Unico G wire — fan-only / dehumi
 // ─────────────────────────────────────────────────────────────
 
 struct Config {
-  bool    theaterEnabled   = false;  // theater zone damper logic active
-  uint8_t ventMinPerHour   = 10;     // fresh-air vent open minutes per hour (0–60)
-  bool    modeOverride     = false;  // true = force system off
-  int8_t  heatPumpMinTempF = 40;     // outdoor °F below which aux electric heat engages
-  int8_t  freeCoolMaxTempF = 60;     // outdoor °F below which free-cooling vent opens
-  uint8_t highHumidityPct  = 80;     // outdoor %RH at or above which vent is forced off
-  uint8_t dehumMaxMinutes  = 20;     // dehumidifier-only runtime before forced high_cool
+  bool    theaterEnabled    = false; // theater zone damper logic active
+  bool    downstairsEnabled = true;  // downstairs zone damper logic active
+                                     //   (false → damper held open unconditionally,
+                                     //    e.g. installs without a real downstairs zone)
+  uint8_t ventMinPerHour    = 10;    // fresh-air vent open minutes per hour (0–60)
+  bool    modeOverride      = false; // true = force system off
+  int8_t  heatPumpMinTempF  = 40;    // outdoor °F below which aux electric heat engages
+  int8_t  freeCoolMaxTempF  = 60;    // outdoor °F below which free-cooling vent opens
+  uint8_t highHumidityPct   = 80;    // outdoor %RH at or above which vent is forced off
+  uint8_t dehumMaxMinutes   = 20;    // dehumidifier-only runtime before forced high_cool
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -467,13 +470,15 @@ void runZoneLogic() {
     desired.theaterDamper = true;            // idle / fan-only: open for circulation
   }
 
-  // Downstairs damper (always enabled)
-  if (mainIsCooling) {
-    desired.downDamper = inp.downCool;
+  // Downstairs damper (gated by downstairsEnabled config flag)
+  if (!cfg.downstairsEnabled) {
+    desired.downDamper = true;            // zone disabled: always open
+  } else if (mainIsCooling) {
+    desired.downDamper = inp.downCool;    // open only if zone calling cool too
   } else if (mainIsHeating) {
-    desired.downDamper = inp.downHeat;
+    desired.downDamper = inp.downHeat;    // open only if zone calling heat too
   } else {
-    desired.downDamper = true;
+    desired.downDamper = true;            // idle / fan-only: open for circulation
   }
 
   // ─────────────────────────────────────────────────────────
@@ -578,12 +583,14 @@ static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl,
   return true;
 }
 
-// Linux calls set_config(te, vph, mo, dmm) → pushes Config
-static bool rpc_set_config(bool te, int vph, bool mo, int dmm) {
-  cfg.theaterEnabled  = te;
-  cfg.ventMinPerHour  = (uint8_t)constrain(vph, 0, 60);
-  cfg.modeOverride    = mo;
-  cfg.dehumMaxMinutes = (uint8_t)constrain(dmm, 5, 120);
+// Linux calls set_config(te, vph, mo, dmm, de) → pushes Config.
+// Arg order MUST match push_config_to_mcu() in linux/bridge_daemon.py.
+static bool rpc_set_config(bool te, int vph, bool mo, int dmm, bool de) {
+  cfg.theaterEnabled    = te;
+  cfg.ventMinPerHour    = (uint8_t)constrain(vph, 0, 60);
+  cfg.modeOverride      = mo;
+  cfg.dehumMaxMinutes   = (uint8_t)constrain(dmm, 5, 120);
+  cfg.downstairsEnabled = de;
   return true;
 }
 

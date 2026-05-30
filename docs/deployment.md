@@ -135,7 +135,37 @@ sudo systemctl start uno-q-usb-host-role.service   # apply role fix now
   data role back to `host` so the USB hub + FTDI dongle enumerate (see §1.3).
   Without this, `/dev/ttyUSB0` will not appear after reboot.
 - `hvac-bridge.service` — the Python bridge daemon. Runs as user `arduino` from
-  `/home/arduino/hvac-controller/linux/`.
+  `/home/arduino/hvac-controller/linux/`. Uses `Type=notify` + `WatchdogSec=60`
+  so systemd kills + restarts it if the main polling loop ever hangs.
+
+### 1.7a Optional — MCU auto-recovery via sudoers
+
+The bridge daemon tracks how long since the last successful MCU RPC read.
+If it exceeds `mcu_hang_threshold_s` (default 60 s), the bridge sets
+`mcu_healthy: false` in the MQTT status payload (the desktop HMI shows
+this as an amber connection LED).
+
+If you also enable `mcu_auto_recover` in the System Settings, the bridge
+will additionally attempt to restart `arduino-router.service` when the
+threshold is exceeded — its `ExecStartPre` cycles SRST (GPIO 38) which
+resets the STM32, and the `--after-ready` hook releases it once the
+router is back listening on `/dev/ttyHS1`.
+
+That needs a one-time sudoers entry so the `arduino` user can run the
+restart without a password:
+
+```bash
+sudo visudo -f /etc/sudoers.d/hvac-bridge
+```
+
+Add:
+
+```
+arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router.service
+```
+
+Save and exit. Without this line, `mcu_auto_recover` falls back to just
+logging the failure (detection / reporting still works).
 
 ### 1.8 Flash the MCU sketch — see §2
 

@@ -116,7 +116,10 @@ CONFIG_FIELDS = [
     ("dehum_max_minutes",         "Dehumidifier max runtime",           "min","int",          5, 120, None,           "After this many minutes of dehumidifier-only operation, switch to high cool until humidity clears."),
     ("vent_minutes_per_hour",     "Fresh-air vent minutes per hour",    "min","int",          0,  60, None,           "How many minutes of every hour the fresh-air vent opens on its internal timer."),
     ("theater_enabled",           "Theater zone enabled",               "",   "bool",      None,None, None,           "When disabled, the theater damper is held open and the theater thermostat is ignored."),
+    ("downstairs_enabled",        "Downstairs zone enabled",            "",   "bool",      None,None, None,           "When disabled, the downstairs damper is held open and the downstairs thermostat is ignored."),
     ("mode_override",             "Mode override",                      "",   "enum",      None,None, ["auto","off"], "'off' forces the system into fan-only mode regardless of thermostat calls."),
+    ("mcu_hang_threshold_s",      "MCU hang threshold",                 "s",  "int",         10, 600, None,           "How many seconds of no successful MCU RPC reads before the bridge flags it as unhealthy (and, if auto-recover is on, restarts arduino-router)."),
+    ("mcu_auto_recover",          "MCU auto-recover",                   "",   "bool",      None,None, None,           "When the MCU is unresponsive past the threshold, run `sudo systemctl restart arduino-router` to cycle SRST and reset the MCU. Requires a sudoers entry — see docs/deployment.md."),
 ]
 
 # ──────────────────────────────────────────────────────────────────────
@@ -533,6 +536,12 @@ async def collect_status(session: ControllerSession) -> dict:
             snapshot["mode"]          = mqtt.get("mode")
             snapshot["compressor_on"] = mqtt.get("compressor_on")
         snapshot["mqtt_ts"]       = mqtt.get("timestamp")
+        # MCU health: published by bridge_daemon every cycle.  We surface
+        # it on the dashboard so a hung MCU is obvious even if the HMI's
+        # own RPC reads happen to look fresh (they don't — but defense in
+        # depth — the bridge sees the same RPC channel and decides).
+        snapshot["mcu_healthy"]   = mqtt.get("mcu_healthy")
+        snapshot["mcu_silence_s"] = mqtt.get("mcu_silence_s")
 
     return snapshot
 
