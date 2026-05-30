@@ -317,11 +317,17 @@ void runZoneLogic() {
     desired.revValve = false;  // B-type: de-energise for cooling
     desired.fanOn    = true;
 
-    if (inp.highHumidity) {
-      // Rule 6: Mitsubishi variable-speed needs high stage for moisture removal
+    // Stage selection priority:
+    //   • Y2 (mainHighCool) — thermostat is explicitly calling stage 2
+    //   • highHumidity      — rule 6, high stage for moisture removal
+    //   • otherwise         — rule 5, low stage on Y1 alone
+    // A standard 2-stage thermostat asserts Y1 first, then adds Y2 when
+    // stage 1 isn't keeping up — so Y2 implies "I need more cooling than
+    // Y1 alone provides" and must engage the high stage even if humidity
+    // is not driving it.
+    if (inp.mainHighCool || inp.highHumidity) {
       desired.highCool = true;
     } else {
-      // Rule 5: normal cooling — low stage
       desired.lowCool = true;
     }
 

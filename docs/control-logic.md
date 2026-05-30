@@ -55,16 +55,25 @@ When `SensorFlags.auxHeatNeeded` is true (outdoor < configurable 40 °F threshol
 - The compressor breaker and the aux heater breaker are separately sized to
   handle simultaneous operation.
 
-### 5. Cool call — no humidity alert
-When the main thermostat calls for cooling and `high_humidity` input is LOW:
+### 5. Cool call — stage 1 (Y1 only, no humidity alert)
+When the main thermostat asserts only **Y1** (`input_main_low_cool`) and
+`input_high_humidity` is LOW:
 - Call `low_cool`
 - Turn on `fan`
 - `reversing_valve` remains de-energized (B-type = cooling)
 
-### 6. Cool call — humidity alert active
-When the main thermostat calls for cooling and `high_humidity` input is HIGH:
-- Call `high_cool` (the Mitsubishi variable-speed compressor requires high stage
-  to achieve meaningful moisture removal; low stage is ineffective for dehumidification)
+### 6. Cool call — stage 2 (Y2 asserted, OR humidity alert)
+When the main thermostat asserts **Y2** (`input_main_high_cool`), high-stage
+cooling engages regardless of humidity.  A standard 2-stage thermostat
+asserts Y1 first and then adds Y2 when stage 1 isn't keeping up — so Y2
+implies "I need more cooling than Y1 alone provides."
+
+Stage 2 also engages on `high_humidity` even with only Y1 active — the
+Mitsubishi variable-speed compressor needs the high stage to achieve
+meaningful moisture removal; low stage is ineffective for dehumidification.
+
+In either case:
+- Call `high_cool` (high-stage compressor)
 - Turn on `fan`
 - `reversing_valve` remains de-energized
 
