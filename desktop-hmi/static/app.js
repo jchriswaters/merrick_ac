@@ -70,6 +70,142 @@
     metadata.outputs.forEach((f) => outG.appendChild(buildOutputCard(f)));
   }
 
+  // ────────────────────────────────────────────────
+  // Settings panel
+  // ────────────────────────────────────────────────
+
+  function buildSettingsPanel() {
+    const grid = $("settings-grid");
+    grid.innerHTML = "";
+    (metadata.config_fields || []).forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "setting-row";
+      row.dataset.key = f.key;
+      row.dataset.kind = f.kind;
+      if (f.min != null) row.dataset.min = f.min;
+      if (f.max != null) row.dataset.max = f.max;
+
+      const labelDiv = document.createElement("div");
+      labelDiv.className = "setting-label";
+      labelDiv.innerHTML = `
+        <div class="setting-label-main">${escapeHtml(f.label)}</div>
+        <div class="setting-help">${escapeHtml(f.help || "")}</div>
+      `;
+
+      const controlDiv = document.createElement("div");
+      controlDiv.className = "setting-control";
+
+      let inputEl;
+      if (f.kind === "bool") {
+        controlDiv.innerHTML = `
+          <label class="setting-toggle">
+            <input type="checkbox">
+            <span class="slider"></span>
+          </label>
+        `;
+        inputEl = controlDiv.querySelector("input[type=checkbox]");
+      } else if (f.kind === "enum") {
+        const sel = document.createElement("select");
+        (f.choices || []).forEach((opt) => {
+          const o = document.createElement("option");
+          o.value = opt; o.textContent = opt;
+          sel.appendChild(o);
+        });
+        controlDiv.appendChild(sel);
+        inputEl = sel;
+      } else {  // int / number
+        const num = document.createElement("input");
+        num.type = "number";
+        if (f.min != null) num.min = f.min;
+        if (f.max != null) num.max = f.max;
+        num.step = 1;
+        controlDiv.appendChild(num);
+        if (f.unit) {
+          const u = document.createElement("span");
+          u.className = "setting-unit"; u.textContent = f.unit;
+          controlDiv.appendChild(u);
+        }
+        inputEl = num;
+      }
+      inputEl.dataset.role = "value";
+      inputEl.addEventListener("input",  () => markDirty(row));
+      inputEl.addEventListener("change", () => markDirty(row));
+
+      const saveBtn = document.createElement("button");
+      saveBtn.className = "setting-save";
+      saveBtn.textContent = "Save";
+      saveBtn.disabled = true;
+      saveBtn.addEventListener("click", () => saveSetting(row));
+
+      row.appendChild(labelDiv);
+      row.appendChild(controlDiv);
+      row.appendChild(saveBtn);
+      grid.appendChild(row);
+    });
+  }
+
+  function readControlValue(row) {
+    const ctrl = row.querySelector("[data-role=value]");
+    const kind = row.dataset.kind;
+    if (kind === "bool") return ctrl.checked;
+    if (kind === "enum") return ctrl.value;
+    const n = parseFloat(ctrl.value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function setControlValue(row, value) {
+    const ctrl = row.querySelector("[data-role=value]");
+    const kind = row.dataset.kind;
+    if (kind === "bool") ctrl.checked = !!value;
+    else ctrl.value = (value === null || value === undefined) ? "" : value;
+    row.dataset.serverValue = JSON.stringify(value);
+    markClean(row);
+  }
+
+  function markDirty(row) {
+    const current = readControlValue(row);
+    const serverStr = row.dataset.serverValue || "null";
+    const isDirty = JSON.stringify(current) !== serverStr;
+    row.classList.toggle("dirty", isDirty);
+    row.querySelector(".setting-save").disabled = !isDirty;
+  }
+  function markClean(row) {
+    row.classList.remove("dirty");
+    row.querySelector(".setting-save").disabled = true;
+  }
+
+  async function saveSetting(row) {
+    const key = row.dataset.key;
+    const value = readControlValue(row);
+    if (value === null) return;
+    const btn = row.querySelector(".setting-save");
+    btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      const ok = sendWS({ type: "set_config", key, value });
+      if (!ok) {
+        // WebSocket not open — fall back to REST
+        const resp = await fetch("/api/set_config", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "set_config", key, value }),
+        });
+        await resp.json();
+      }
+    } catch (e) { console.error("save failed", e); }
+    btn.textContent = "Save";
+    // Cleanup happens when the next snapshot arrives via updateSettings()
+  }
+
+  function updateSettings(snap) {
+    const cfg = snap.config;
+    if (!cfg) return;
+    document.querySelectorAll("#settings-grid .setting-row").forEach((row) => {
+      // Don't clobber a value the user is currently editing.
+      if (row.classList.contains("dirty")) return;
+      const key = row.dataset.key;
+      if (key in cfg) setControlValue(row, cfg[key]);
+    });
+  }
+
   function updateOutputs(valueMap) {
     if (!valueMap) return;
     document.querySelectorAll("#outputs-grid .iocard").forEach((card) => {
@@ -152,18 +288,25 @@
     else if (mode.includes("heat")) modeEl.classList.add("is-heat");
     else if (mode.includes("dehum")) modeEl.classList.add("is-dehum");
 
-    // Compressor
+    // Heat-pump compressor — derived in bridge_daemon from the low_cool
+    // / high_cool relays, so it's accurate even without the SDM120 wired.
     const compEl = $("compressor");
+    const compSub = $("compressor-sub");
+    const outs = snap.outputs || {};
+    let stageLabel = "stage idle";
+    if (outs.high_cool) stageLabel = outs.reversing_valve ? "high heat (heat pump)" : "high cool";
+    else if (outs.low_cool) stageLabel = outs.reversing_valve ? "low heat (heat pump)" : "low cool";
     if (snap.compressor_on === true) { compEl.textContent = "RUNNING"; compEl.className = "hero-value is-on"; }
     else if (snap.compressor_on === false) { compEl.textContent = "STOPPED"; compEl.className = "hero-value is-off"; }
     else { compEl.textContent = "—"; compEl.className = "hero-value"; }
+    if (compSub) compSub.textContent = stageLabel;
 
-    // Sensors
+    // Sensors  (temp and humidity get equal visual weight now)
     const s = snap.sensors || {};
     $("indoor-temp").textContent  = fmt(s.indoor_temp_f);
-    $("indoor-hum").textContent   = s.indoor_humidity_pct != null ? `${fmt(s.indoor_humidity_pct, 0)} %RH` : "— %RH";
+    $("indoor-hum").textContent   = s.indoor_humidity_pct != null ? fmt(s.indoor_humidity_pct, 0) : "—";
     $("outdoor-temp").textContent = fmt(s.outdoor_temp_f);
-    $("outdoor-hum").textContent  = s.outdoor_humidity_pct != null ? `${fmt(s.outdoor_humidity_pct, 0)} %RH` : "— %RH";
+    $("outdoor-hum").textContent  = s.outdoor_humidity_pct != null ? fmt(s.outdoor_humidity_pct, 0) : "—";
     $("ac-power").textContent      = s.ac_power_w   != null ? fmt(s.ac_power_w, 0) : "—";
     $("ac-current").textContent    = s.ac_current_a != null ? fmt(s.ac_current_a, 1) : "—";
     $("ac-voltage").textContent    = s.ac_voltage_v != null ? fmt(s.ac_voltage_v, 0) : "—";
@@ -188,6 +331,7 @@
     updateInputs(snap.inputs, snap.input_override);
     updateOutputs(snap.outputs);
     updateSimBanner(snap);
+    updateSettings(snap);
 
     const ts = snap.ts ? new Date(snap.ts * 1000) : new Date();
     let footer = `Last update: ${ts.toLocaleTimeString()}`;
@@ -230,6 +374,7 @@
       const resp = await fetch("/api/metadata");
       metadata = await resp.json();
       buildGrids();
+      buildSettingsPanel();
       if (metadata.controller_host) hostEl.textContent = metadata.controller_host;
       if (lastSnap) applySnapshot(lastSnap);
     } catch (e) {

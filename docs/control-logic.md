@@ -96,18 +96,22 @@ The main thermostat is the sole authority over the Unico unit. Secondary zone
 thermostats (theater, downstairs) **only** open or close their room damper —
 they never change what the compressor or fan does.
 
-The **default damper state is open**. A secondary zone damper closes only when
-that zone is actively requesting the opposite of what the main thermostat is
-currently running. This prevents forcing unwanted hot or cold air into a room
-while still allowing conditioned air to circulate freely to satisfied rooms.
+While the Unico is actively heating or cooling, a secondary zone damper
+opens **only** if that zone is actively calling for the SAME mode the main
+thermostat is driving. Any zone that isn't asking for the current mode —
+whether it's silent (room already at temperature) or asking for the
+opposite direction — gets its damper closed. This concentrates the
+conditioned airflow into the rooms that actually want it.
 
 | Secondary zone state | Main unit mode | Damper action |
 |----------------------|----------------|---------------|
-| Not calling (satisfied) | Any          | **Open** |
-| Calling heat         | Heating        | **Open** |
-| Calling cool         | Cooling        | **Open** |
-| Calling heat         | Cooling        | **Closed** |
-| Calling cool         | Heating        | **Closed** |
+| Calling heat            | Heating       | **Open** |
+| Calling cool            | Cooling       | **Open** |
+| Calling heat            | Cooling       | **Closed** |
+| Calling cool            | Heating       | **Closed** |
+| Not calling (satisfied) | Heating       | **Closed** |
+| Not calling (satisfied) | Cooling       | **Closed** |
+| Any                     | Idle / fan-only | **Open** (whole-house circulation) |
 
 Theater damper is also gated by `cfg.theaterEnabled` — if the theater zone is
 disabled in config, its damper stays open unconditionally.
@@ -149,9 +153,19 @@ space). Maximize fresh air intake subject to constraints:
 1. `low_cool`, `high_cool`, and `high_heat` are **mutually exclusive** with each
    other — only one may be active at a time. `high_heat` (aux electric) may run
    simultaneously with heat pump stages during cold-weather heating (rule 4).
-2. A **180-second lockout** follows any compressor mode change. No further mode
-   change is permitted during this window.
-3. `reversing_valve` is de-energized whenever the system is in cooling mode or
+2. **Mode-reversal interlock (180 s).**  Restarting the heat-pump compressor
+   in the **opposite direction** (cooling↔heating) within 180 s of the last
+   stop is blocked, to give the reversing valve and refrigerant pressures
+   time to equalize.  Restarting in the **same direction** is allowed
+   immediately — the silent-then-on-again case doesn't risk the compressor.
+   Live stage changes (low_cool ↔ high_cool while running) do not stop the
+   compressor and are therefore never subject to the timer.
+3. **Mode-reversal-while-running guard.**  If the reversing valve must
+   change direction while the compressor is still spinning, the firmware
+   forces the compressor off immediately and holds the valve in its current
+   position.  The mode-reversal interlock above then gates the restart in
+   the new direction.
+4. `reversing_valve` is de-energized whenever the system is in cooling mode or
    fully off (B-type wiring confirmed for this installation).
-4. All output pins are driven LOW in `setup()` before any logic runs to prevent
+5. All output pins are driven LOW in `setup()` before any logic runs to prevent
    relay chatter on power-up.

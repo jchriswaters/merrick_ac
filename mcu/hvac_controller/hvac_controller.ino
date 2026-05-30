@@ -136,11 +136,23 @@ Inputs      inp;
 Outputs     out;
 SensorFlags sf;
 
-// Compressor short-cycle / mode-change interlock (3 minutes)
-// Timer starts when compressor turns OFF. Prevents turning back ON,
-// or reversing heat↔cool, until INTERLOCK_MS has elapsed.
+// Compressor mode-reversal interlock (3 minutes).
+//
+// Timer starts whenever the compressor stops.  Within INTERLOCK_MS of
+// that, restarting the compressor in the OPPOSITE direction (heat<->cool)
+// is blocked — the mechanical reversal protection.  Restarting in the
+// SAME direction is allowed immediately (no short-cycle penalty when the
+// system is just satisfying the same kind of call again), and live stage
+// changes within a direction (low_cool <-> high_cool) never trigger the
+// timer at all because they don't stop the compressor.
 const unsigned long INTERLOCK_MS = 180000UL;
 unsigned long lastCompressorOffMs = 0;
+
+enum CompMode : uint8_t { CM_NONE = 0, CM_COOL = 1, CM_HEAT = 2 };
+// The direction the heat-pump compressor was in last time it ran.
+// Used to decide whether a fresh start is in the SAME direction (allowed
+// immediately) or the OPPOSITE direction (subject to INTERLOCK_MS).
+CompMode lastCompressorMode = CM_NONE;
 
 // Dehumidifier runtime timer (rules 7–8 in control-logic.md)
 // Dehumidifier runs alone (no compressor) while humidity is high.
@@ -359,42 +371,49 @@ void runZoneLogic() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // COMPRESSOR INTERLOCK (anti-short-cycle + mode-change delay)
+  // COMPRESSOR INTERLOCK (mode-reversal protection only)
   //
-  // lastCompressorOffMs is set whenever the compressor turns OFF.
-  // While the interlock is active:
-  //   • Turning the compressor ON is blocked (from any OFF state)
-  //   • Reversing the valve while compressor is on is blocked
-  // Turning the compressor OFF is always allowed immediately.
-  // Stage changes within the same mode (low↔high within cooling)
-  // are allowed without triggering the interlock.
+  // Restarting the compressor in the SAME direction (cool→cool or
+  // heat→heat) is allowed immediately — the silent-then-on-again case
+  // doesn't risk the compressor mechanically.
+  // Restarting in the OPPOSITE direction within INTERLOCK_MS of the
+  // last stop is blocked, to give the reversing valve and refrigerant
+  // pressures time to equalize.
+  // Live stage changes (low↔high) within a single direction never stop
+  // the compressor, so they're not subject to the timer at all.
   // ─────────────────────────────────────────────────────────
 
   bool wasCompOn   = out.highCool  || out.lowCool;   // heat pump compressor was running
   bool wantsCompOn = desired.highCool || desired.lowCool;
+  CompMode wantedMode = desired.revValve ? CM_HEAT : CM_COOL;
 
-  // ── Mode-reversal guard ────────────────────────────────────
-  // If the reversing valve must change direction while the compressor is
-  // still spinning, we cannot wait for the interlock timer — the timer
-  // only starts when the compressor turns off, so interlockActive() would
-  // never fire.  Force the compressor off immediately, hold the valve in
-  // its current position, and let the normal anti-short-cycle logic below
-  // protect the restart in the new mode.
+  // ── Mode-reversal-while-running guard ──────────────────────
+  // If the reversing valve must change direction while the compressor
+  // is still spinning, the timer-based interlock can't help (it only
+  // starts when the compressor stops).  Force the compressor off
+  // immediately, hold the valve in its current position, and let the
+  // restart-protection block below gate the new direction.
   if (wasCompOn && wantsCompOn && (desired.revValve != out.revValve)) {
     desired.highCool = false;
     desired.lowCool  = false;
     desired.highHeat = false;
-    desired.revValve = out.revValve;   // hold valve; restart in new mode after interlock
+    desired.revValve = out.revValve;   // hold valve; new direction starts after lockout
     wantsCompOn      = false;          // compressor is now off — let timer start below
   }
 
-  // Start the interlock timer when the heat pump compressor turns off
+  // Start the interlock timer when the compressor turns off, and
+  // remember which direction it was running in so we can tell a same-
+  // direction restart from a reversal.
   if (wasCompOn && !wantsCompOn) {
     lastCompressorOffMs = millis();
+    lastCompressorMode  = out.revValve ? CM_HEAT : CM_COOL;
   }
 
-  // Block turning compressor ON during lockout (anti-short-cycle)
-  if (!wasCompOn && wantsCompOn && interlockActive()) {
+  // Block ONLY a direction reversal within the lockout window.
+  // Same-direction restarts go through immediately (no penalty).
+  bool isReversal = (lastCompressorMode != CM_NONE) &&
+                    (wantedMode != lastCompressorMode);
+  if (!wasCompOn && wantsCompOn && isReversal && interlockActive()) {
     desired.highCool = false;
     desired.lowCool  = false;
     desired.highHeat = false;
@@ -406,29 +425,36 @@ void runZoneLogic() {
   // ─────────────────────────────────────────────────────────
   // ZONE DAMPER LOGIC (rules 10–11)
   //
-  // Default state: OPEN.
-  // A secondary zone damper closes ONLY when its thermostat is
-  // calling for the opposite of what the main thermostat is running.
-  // When not calling (zone satisfied), damper stays open for circulation.
+  // While the system is ACTIVELY heating or cooling, a secondary zone's
+  // damper opens only if that zone is actively calling for the SAME
+  // mode the main thermostat is driving.  Any zone that isn't asking
+  // for the current mode (silent or wrong direction) → damper closes.
+  //
+  // While the system is idle / fan-only / dehumidifier-only, all zone
+  // dampers open for whole-house circulation.
   // ─────────────────────────────────────────────────────────
 
   bool mainIsHeating = desired.revValve && (desired.lowCool || desired.highCool);
   bool mainIsCooling = !desired.revValve && (desired.lowCool || desired.highCool);
 
   // Theater damper (gated by theaterEnabled config flag)
-  if (cfg.theaterEnabled) {
-    bool conflict = (inp.theaterHeat && mainIsCooling) ||
-                    (inp.theaterCool && mainIsHeating);
-    desired.theaterDamper = !conflict;   // open unless zone is fighting main mode
+  if (!cfg.theaterEnabled) {
+    desired.theaterDamper = true;            // zone disabled: always open
+  } else if (mainIsCooling) {
+    desired.theaterDamper = inp.theaterCool; // open only if zone calling cool too
+  } else if (mainIsHeating) {
+    desired.theaterDamper = inp.theaterHeat; // open only if zone calling heat too
   } else {
-    desired.theaterDamper = true;        // zone disabled: always open
+    desired.theaterDamper = true;            // idle / fan-only: open for circulation
   }
 
-  // Downstairs damper
-  {
-    bool conflict = (inp.downHeat && mainIsCooling) ||
-                    (inp.downCool && mainIsHeating);
-    desired.downDamper = !conflict;
+  // Downstairs damper (always enabled)
+  if (mainIsCooling) {
+    desired.downDamper = inp.downCool;
+  } else if (mainIsHeating) {
+    desired.downDamper = inp.downHeat;
+  } else {
+    desired.downDamper = true;
   }
 
   // ─────────────────────────────────────────────────────────

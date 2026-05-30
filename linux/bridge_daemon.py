@@ -22,6 +22,7 @@ Run as a systemd service: see linux/hvac-bridge.service
 
 import json
 import logging
+import os
 import struct
 import threading
 import time
@@ -53,7 +54,21 @@ except ImportError:
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────
 
-CONFIG_PATH    = Path("/etc/hvac/config.json")
+# Resolution order:
+#   1. HVAC_CONFIG_PATH env var (override for tests / unusual installs)
+#   2. ~/.config/hvac/config.json  — writable by the service user (arduino)
+#   3. /etc/hvac/config.json       — read-only fallback (legacy path)
+#
+# Previously this was hard-coded to /etc/hvac/config.json, but the service
+# now runs as the `arduino` user (not root), so writes there fail with
+# EACCES and setConfig changes don't persist across reboots.  Falling back
+# to the legacy /etc/hvac path on read keeps existing installs working.
+_xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+_legacy = Path("/etc/hvac/config.json")
+_user_default = Path(_xdg) / "hvac" / "config.json"
+CONFIG_PATH = Path(os.environ.get("HVAC_CONFIG_PATH") or (
+    _legacy if _legacy.exists() and not _user_default.exists() else _user_default
+))
 RS485_PORT     = "/dev/ttyUSB0"   # Waveshare USB-RS485 adapter
 RS485_BAUD     = 9600
 RS485_TIMEOUT  = 1.0              # seconds per Modbus request
@@ -752,8 +767,14 @@ def run() -> None:
         push_sensor_flags_to_mcu(flags)
 
         # ── Derive compound fields ─────────────────────────────
+        # compressor_on = heat-pump compressor is currently energized.
+        # Derived from the MCU's relay state so it remains accurate even
+        # while the SDM120 AC current meter isn't wired/reporting.  Both
+        # cooling (low_cool / high_cool) and heating (low_cool / high_cool
+        # with reversing_valve) run the same compressor; high_heat is
+        # auxiliary electric resistance, not the compressor.
         payload["mode"]         = derive_mode(payload)
-        payload["compressor_on"] = payload.get("ac_current_a", 0.0) > 5.0
+        payload["compressor_on"] = bool(payload.get("low_cool")) or bool(payload.get("high_cool"))
         payload["timestamp"]    = int(time.time())
 
         # ── Write status cache for web_config.py ───────────────
