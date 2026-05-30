@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 ---
 
@@ -30,13 +30,10 @@ codebase or pasting a transcript.
 
 | Thing | Value | Notes |
 |---|---|---|
-| Controller SSH | `arduino@<ip>` / pass `piragua827` | **IP is DHCP and has changed** (.195 → .197). Set a static DHCP lease on the router to stop this moving. |
+| Controller SSH | `arduino@192.168.1.197` / pass `piragua827` | IP pinned by DHCP reservation on the router. MAC `14:b5:cd:ea:d3:31`, hostname `MerrickAC`. |
 | Linux side | Debian on QRB2210 | runs arduino-router, hvac-bridge, mosquitto |
 | MCU | STM32U585, Zephyr + Arduino LLEXT sketch | flashed via `tools/flash_sketch.py` |
 | Dev machine | Windows laptop, Python 3.14 | Arduino CLI at `C:\Program Files\Arduino CLI\` |
-
-> **TODO:** assign the controller a static IP / DHCP reservation and
-> record it here so config files and docs stop chasing a moving target.
 
 ---
 
@@ -63,8 +60,6 @@ codebase or pasting a transcript.
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not
   yet returning data.
 - SDM120 dehumidifier meter (0x04) — same.
-- Static DHCP lease for the controller (see above).  Controller WiFi MAC
-  is `14:b5:cd:ea:d3:31`; last seen at 192.168.1.197.
 - `web_config.py` Flask config API — present in repo, deployment/runtime
   status on the board not re-verified this cycle.
 - HMI CrowPanel ESP32 (`hmi/crowpanel_hvac/`) — not deployed/verified.
@@ -134,8 +129,5 @@ sim/         offline simulator + sensor bench tools
 ## Open questions / future work
 
 - Wire + verify the two SDM120 power meters.
-- Phase 2 input simulation in the desktop HMI (needs an MCU-side
-  `set_input_override` RPC + UI toggles; hook points already in place).
 - Decide whether the desktop HMI should also run as a service on the
   controller (so it's available without the laptop), or stay laptop-local.
-- Static IP / DHCP reservation for the controller.
