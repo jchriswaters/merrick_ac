@@ -107,14 +107,16 @@ INPUTS = [
 # commands against its own schema.  The UI reads min/max/unit from here
 # to render the input controls.
 CONFIG_FIELDS = [
-    # (key,                     label,                            unit, kind,            min, max, choices,        help)
-    ("heat_pump_min_temp_f",    "Heat pump min outdoor temp",     "°F", "int",             20,  60, None,           "Auxiliary electric heat engages when outdoor temperature is below this."),
-    ("free_cool_max_temp_f",    "Free-cooling max outdoor temp",  "°F", "int",             40,  80, None,           "Fresh-air vent opens for free cooling when outdoor temperature is below this."),
-    ("high_humidity_pct",       "Outdoor humidity vent limit",    "%",  "int",             50, 100, None,           "Fresh-air vent is forced off when outdoor humidity is at or above this."),
-    ("dehum_max_minutes",       "Dehumidifier max runtime",       "min","int",              5, 120, None,           "After this many minutes of dehumidifier-only operation, switch to high cool until humidity clears."),
-    ("vent_minutes_per_hour",   "Fresh-air vent minutes per hour","min","int",              0,  60, None,           "How many minutes of every hour the fresh-air vent opens on its internal timer."),
-    ("theater_enabled",         "Theater zone enabled",           "",   "bool",          None,None, None,           "When disabled, the theater damper is held open and the theater thermostat is ignored."),
-    ("mode_override",           "Mode override",                  "",   "enum",          None,None, ["auto","off"], "'off' forces the system into fan-only mode regardless of thermostat calls."),
+    # (key,                       label,                                unit, kind,         min, max, choices,        help)
+    ("heat_pump_min_temp_f",      "Heat pump min outdoor temp",         "°F", "int",         20,  60, None,           "Auxiliary electric heat engages when outdoor temperature is below this."),
+    ("free_cool_max_temp_f",      "Free-cooling max outdoor temp",      "°F", "int",         40,  80, None,           "Fresh-air vent opens for free cooling when outdoor temperature is below this."),
+    ("high_humidity_pct",         "Outdoor humidity vent limit",        "%",  "int",         50, 100, None,           "Fresh-air vent is forced off when outdoor humidity is at or above this."),
+    ("indoor_humidity_low_pct",   "Indoor humidity (low / soft)",       "%",  "int",         30,  70, None,           "Below this indoor RH, the dehumidifier alone is considered sufficient (humidistat → dehumidifier-only)."),
+    ("indoor_humidity_high_pct",  "Indoor humidity (high / emergency)", "%",  "int",         40,  90, None,           "At or above this indoor RH, force the AC into high cool and turn off the dehumidifier, regardless of the humidistat input."),
+    ("dehum_max_minutes",         "Dehumidifier max runtime",           "min","int",          5, 120, None,           "After this many minutes of dehumidifier-only operation, switch to high cool until humidity clears."),
+    ("vent_minutes_per_hour",     "Fresh-air vent minutes per hour",    "min","int",          0,  60, None,           "How many minutes of every hour the fresh-air vent opens on its internal timer."),
+    ("theater_enabled",           "Theater zone enabled",               "",   "bool",      None,None, None,           "When disabled, the theater damper is held open and the theater thermostat is ignored."),
+    ("mode_override",             "Mode override",                      "",   "enum",      None,None, ["auto","off"], "'off' forces the system into fan-only mode regardless of thermostat calls."),
 ]
 
 # ──────────────────────────────────────────────────────────────────────

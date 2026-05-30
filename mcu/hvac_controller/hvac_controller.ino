@@ -83,12 +83,14 @@ struct Config {
 // ─────────────────────────────────────────────────────────────
 
 struct SensorFlags {
-  bool heatPumpOk     = true;   // outdoor >= heatPumpMinTempF  → heat pump alone is fine
-  bool auxHeatNeeded  = false;  // outdoor < heatPumpMinTempF   → also run aux electric
-  bool tempRisingFast = true;   // indoor rising >= 1°F / 15 min → heat pump keeping up
-                                //   default TRUE = start low stage; escalate if Linux says not keeping up
-  bool ventOk         = false;  // outdoor < freeCoolMaxTempF AND hum < threshold → open vent
-  bool ventBlocked    = false;  // outdoor humidity >= highHumidityPct → vent must stay off
+  bool heatPumpOk        = true;   // outdoor >= heatPumpMinTempF  → heat pump alone is fine
+  bool auxHeatNeeded     = false;  // outdoor < heatPumpMinTempF   → also run aux electric
+  bool tempRisingFast    = true;   // indoor rising >= 1°F / 15 min → heat pump keeping up
+                                   //   default TRUE = start low stage; escalate if Linux says not keeping up
+  bool ventOk            = false;  // outdoor < freeCoolMaxTempF AND hum < threshold → open vent
+  bool ventBlocked       = false;  // outdoor humidity >= highHumidityPct → vent must stay off
+  bool humidityModerate  = false;  // indoor RH >= indoorHumidityLowPct  → dehumidifier-only no longer "safe enough"
+  bool humidityHigh      = false;  // indoor RH >= indoorHumidityHighPct → emergency: force high_cool, kill dehumidifier
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -312,38 +314,49 @@ void runZoneLogic() {
       desired.highHeat = true;
     }
 
-  } else if (mainCoolCall) {
-    // ── Rules 5–6: Cooling ────────────────────────────────────
-    desired.revValve = false;  // B-type: de-energise for cooling
+  } else if (mainCoolCall || sf.humidityHigh) {
+    // ── Cooling (main thermostat OR emergency dehumidification) ──
+    //
+    // Rule 3 (humidityHigh): if indoor humidity is above the second-level
+    // threshold, force high_cool regardless of the humidistat input.
+    // This routes through the same cooling branch as a thermostat cool
+    // call (so the mutual-exclusion-with-dehumidifier logic + interlocks
+    // all still apply).
+    desired.revValve = false;
     desired.fanOn    = true;
 
     // Stage selection priority:
-    //   • Y2 (mainHighCool) — thermostat is explicitly calling stage 2
-    //   • highHumidity      — rule 6, high stage for moisture removal
+    //   • humidityHigh      — rule 3, emergency dehumidification → high
+    //   • Y2 (mainHighCool) — rule 1 / standard 2-stage thermostat → high
+    //   • highHumidity      — rule 6, humidistat moisture removal → high
     //   • otherwise         — rule 5, low stage on Y1 alone
-    // A standard 2-stage thermostat asserts Y1 first, then adds Y2 when
-    // stage 1 isn't keeping up — so Y2 implies "I need more cooling than
-    // Y1 alone provides" and must engage the high stage even if humidity
-    // is not driving it.
-    if (inp.mainHighCool || inp.highHumidity) {
+    if (sf.humidityHigh || inp.mainHighCool || inp.highHumidity) {
       desired.highCool = true;
     } else {
       desired.lowCool = true;
     }
 
   } else {
-    // ── No main thermostat call ───────────────────────────────
+    // ── No main cool / heat call, indoor humidity not yet "high" ──
 
     if (inp.highHumidity) {
-      // Rules 7–8: Dehumidification without a cooling call
+      // Rules 2 / 7 / 8: humidistat is asking for dehumidification.
       if (dehumTimedOut) {
-        // Rule 8: dehumidifier has been running too long → switch to high_cool
-        // until humidity clears. Compressor subject to interlock (handled below).
+        // Rule 8 safety: dehumidifier has been running too long without
+        // clearing the humidistat — escalate to high_cool until it does.
         desired.highCool = true;
         desired.fanOn    = true;
+      } else if (sf.humidityModerate) {
+        // Indoor humidity is in the "moderate" band (>= low threshold,
+        // < high threshold).  The dehumidifier may not be keeping up but
+        // we haven't tripped the emergency threshold yet — keep running
+        // the dehumidifier and let the timeout safety catch a real failure.
+        desired.dehumOn = true;
+        desired.fanOn   = true;
       } else {
-        // Rule 7: run dehumidifier + fan; no compressor
-        // (dehumidifier exhaust feeds into air handler before condenser coil)
+        // Rule 2: humidistat is on but indoor humidity is below the
+        // first-level threshold (dehumidifier alone is comfortably
+        // handling moisture).  Run dehumidifier + fan only — no compressor.
         desired.dehumOn = true;
         desired.fanOn   = true;
       }
@@ -551,13 +564,17 @@ static String rpc_get_inputs() {
   return String(buf);
 }
 
-// Linux calls set_flags(hpo, ahn, trf, vok, vbl) → pushes SensorFlags
-static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl) {
-  sf.heatPumpOk    = hpo;
-  sf.auxHeatNeeded = ahn;
-  sf.tempRisingFast = trf;
-  sf.ventOk        = vok;
-  sf.ventBlocked   = vbl;
+// Linux calls set_flags(hpo, ahn, trf, vok, vbl, hmod, hhi) → pushes SensorFlags.
+// Arg order MUST match push_sensor_flags_to_mcu() in linux/bridge_daemon.py.
+static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl,
+                          bool hmod, bool hhi) {
+  sf.heatPumpOk       = hpo;
+  sf.auxHeatNeeded    = ahn;
+  sf.tempRisingFast   = trf;
+  sf.ventOk           = vok;
+  sf.ventBlocked      = vbl;
+  sf.humidityModerate = hmod;
+  sf.humidityHigh     = hhi;
   return true;
 }
 

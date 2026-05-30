@@ -127,28 +127,32 @@ MCU_INPUT_FIELDS = [
 # ──────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG: dict = {
-    "mqtt_host":              "localhost",   # UPDATE to your broker IP
-    "mqtt_port":              1883,
-    "mqtt_username":          None,          # None = no auth
-    "mqtt_password":          None,
-    "theater_enabled":        False,
-    "vent_minutes_per_hour":  10,
-    "mode_override":          "auto",        # "auto" | "off"
-    "heat_pump_min_temp_f":   40,            # aux heat engages below this °F
-    "free_cool_max_temp_f":   60,            # free-cooling vent opens below this °F
-    "high_humidity_pct":      80,            # vent forced off at or above this %RH
-    "dehum_max_minutes":      20,            # dehumidifier timeout before forced high_cool
+    "mqtt_host":                "localhost",   # UPDATE to your broker IP
+    "mqtt_port":                1883,
+    "mqtt_username":            None,          # None = no auth
+    "mqtt_password":            None,
+    "theater_enabled":          False,
+    "vent_minutes_per_hour":    10,
+    "mode_override":            "auto",        # "auto" | "off"
+    "heat_pump_min_temp_f":     40,            # aux heat engages below this °F
+    "free_cool_max_temp_f":     60,            # free-cooling vent opens below this °F
+    "high_humidity_pct":        80,            # OUTDOOR humidity — vent forced off at or above this %RH
+    "indoor_humidity_low_pct":  55,            # INDOOR humidity — dehumidifier-only is sufficient below this %RH
+    "indoor_humidity_high_pct": 65,            # INDOOR humidity — force high_cool emergency dehum at or above this %RH
+    "dehum_max_minutes":        20,            # dehumidifier timeout before forced high_cool
 }
 
 # Allowed keys, (min, max, type) — None = no range check
 SETCONFIG_SCHEMA: dict = {
-    "heat_pump_min_temp_f":  (20,   60, int),
-    "free_cool_max_temp_f":  (40,   80, int),
-    "high_humidity_pct":     (50,  100, int),
-    "dehum_max_minutes":     ( 5,  120, int),
-    "vent_minutes_per_hour": ( 0,   60, int),
-    "theater_enabled":       (None, None, bool),
-    "mode_override":         (None, None, str),
+    "heat_pump_min_temp_f":     (20,   60, int),
+    "free_cool_max_temp_f":     (40,   80, int),
+    "high_humidity_pct":        (50,  100, int),
+    "indoor_humidity_low_pct":  (30,   70, int),
+    "indoor_humidity_high_pct": (40,   90, int),
+    "dehum_max_minutes":        ( 5,  120, int),
+    "vent_minutes_per_hour":    ( 0,   60, int),
+    "theater_enabled":          (None, None, bool),
+    "mode_override":            (None, None, str),
 }
 
 log = logging.getLogger("hvac")
@@ -370,10 +374,11 @@ def _compute_temp_rising_fast(current_temp_f: float) -> bool:
 
 
 def compute_sensor_flags(
-    outdoor_temp_f:      Optional[float],
+    outdoor_temp_f:       Optional[float],
     outdoor_humidity_pct: Optional[float],
-    indoor_temp_f:       Optional[float],
-    cfg:                 dict,
+    indoor_temp_f:        Optional[float],
+    indoor_humidity_pct:  Optional[float],
+    cfg:                  dict,
 ) -> dict:
     """
     Evaluate environmental thresholds and return a dict of SensorFlag booleans
@@ -381,9 +386,11 @@ def compute_sensor_flags(
 
     Returns cautious defaults if sensor readings are unavailable.
     """
-    heat_min  = cfg["heat_pump_min_temp_f"]
-    cool_max  = cfg["free_cool_max_temp_f"]
-    hum_limit = cfg["high_humidity_pct"]
+    heat_min      = cfg["heat_pump_min_temp_f"]
+    cool_max      = cfg["free_cool_max_temp_f"]
+    hum_limit     = cfg["high_humidity_pct"]
+    in_hum_low    = cfg["indoor_humidity_low_pct"]
+    in_hum_high   = cfg["indoor_humidity_high_pct"]
 
     # Default to safe values when sensor data is absent
     if outdoor_temp_f is not None:
@@ -411,12 +418,27 @@ def compute_sensor_flags(
         log.warning("Indoor temp unavailable — defaulting tempRisingFast=True")
         temp_rising_fast = True   # safe default: stay on low stage
 
+    # Indoor humidity drives two thresholds:
+    #   • humidityModerate — RH >= low threshold (dehumidifier may not keep up)
+    #   • humidityHigh     — RH >= high threshold (emergency: force high_cool)
+    # If the reading is missing, default both to FALSE so we don't trigger
+    # emergency cooling on a sensor outage.
+    if indoor_humidity_pct is not None:
+        humidity_moderate = indoor_humidity_pct >= in_hum_low
+        humidity_high     = indoor_humidity_pct >= in_hum_high
+    else:
+        log.warning("Indoor humidity unavailable — defaulting humidityModerate/High=False")
+        humidity_moderate = False
+        humidity_high     = False
+
     return {
-        "heatPumpOk":    heat_pump_ok,
-        "auxHeatNeeded": aux_heat_needed,
-        "tempRisingFast": temp_rising_fast,
-        "ventOk":        vent_temp_ok and vent_hum_ok,
-        "ventBlocked":   vent_blocked,
+        "heatPumpOk":        heat_pump_ok,
+        "auxHeatNeeded":     aux_heat_needed,
+        "tempRisingFast":    temp_rising_fast,
+        "ventOk":            vent_temp_ok and vent_hum_ok,
+        "ventBlocked":       vent_blocked,
+        "humidityModerate":  humidity_moderate,
+        "humidityHigh":      humidity_high,
     }
 
 # ──────────────────────────────────────────────────────────────
@@ -461,11 +483,13 @@ def push_sensor_flags_to_mcu(flags: dict) -> None:
         return
     try:
         _MCUBridge.call("set_flags",
-            bool(flags.get("heatPumpOk",    True)),
-            bool(flags.get("auxHeatNeeded", False)),
-            bool(flags.get("tempRisingFast", True)),
-            bool(flags.get("ventOk",        False)),
-            bool(flags.get("ventBlocked",   False)),
+            bool(flags.get("heatPumpOk",       True)),
+            bool(flags.get("auxHeatNeeded",    False)),
+            bool(flags.get("tempRisingFast",   True)),
+            bool(flags.get("ventOk",           False)),
+            bool(flags.get("ventBlocked",      False)),
+            bool(flags.get("humidityModerate", False)),
+            bool(flags.get("humidityHigh",     False)),
         )
     except Exception as exc:
         log.warning("MCU Bridge set_flags failed: %s", exc)
@@ -514,14 +538,16 @@ def derive_mode(s: dict) -> str:
 def build_config_payload(cfg: dict) -> dict:
     """Build the home/hvac/config MQTT payload from the current config dict."""
     return {
-        "theater_enabled":        cfg.get("theater_enabled", False),
-        "vent_minutes_per_hour":  cfg.get("vent_minutes_per_hour", 10),
-        "mode_override":          cfg.get("mode_override", "auto"),
-        "heat_pump_min_temp_f":   cfg.get("heat_pump_min_temp_f", 40),
-        "free_cool_max_temp_f":   cfg.get("free_cool_max_temp_f", 60),
-        "high_humidity_pct":      cfg.get("high_humidity_pct", 80),
-        "dehum_max_minutes":      cfg.get("dehum_max_minutes", 20),
-        "config_updated_at":      int(time.time()),
+        "theater_enabled":          cfg.get("theater_enabled", False),
+        "vent_minutes_per_hour":    cfg.get("vent_minutes_per_hour", 10),
+        "mode_override":            cfg.get("mode_override", "auto"),
+        "heat_pump_min_temp_f":     cfg.get("heat_pump_min_temp_f", 40),
+        "free_cool_max_temp_f":     cfg.get("free_cool_max_temp_f", 60),
+        "high_humidity_pct":        cfg.get("high_humidity_pct", 80),
+        "indoor_humidity_low_pct":  cfg.get("indoor_humidity_low_pct", 55),
+        "indoor_humidity_high_pct": cfg.get("indoor_humidity_high_pct", 65),
+        "dehum_max_minutes":        cfg.get("dehum_max_minutes", 20),
+        "config_updated_at":        int(time.time()),
     }
 
 # ──────────────────────────────────────────────────────────────
@@ -734,6 +760,7 @@ def run() -> None:
 
         # ── Read RS485 sensors ─────────────────────────────────
         indoor_temp_f       = None
+        indoor_humidity     = None
         outdoor_temp_f      = None
         outdoor_humidity    = None
 
@@ -741,7 +768,8 @@ def run() -> None:
             indoor = read_sht30(modbus, ADDR_SHT30_INDOOR, "indoor")
             if indoor:
                 payload.update(indoor)
-                indoor_temp_f = indoor.get("indoor_temp_f")
+                indoor_temp_f   = indoor.get("indoor_temp_f")
+                indoor_humidity = indoor.get("indoor_humidity_pct")
 
             outdoor = read_sht30(modbus, ADDR_SHT30_OUTDOOR, "outdoor")
             if outdoor:
@@ -762,6 +790,7 @@ def run() -> None:
             outdoor_temp_f=outdoor_temp_f,
             outdoor_humidity_pct=outdoor_humidity,
             indoor_temp_f=indoor_temp_f,
+            indoor_humidity_pct=indoor_humidity,
             cfg=cfg_snap,
         )
         push_sensor_flags_to_mcu(flags)

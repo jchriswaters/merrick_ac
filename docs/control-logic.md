@@ -77,8 +77,10 @@ In either case:
 - Turn on `fan`
 - `reversing_valve` remains de-energized
 
-### 7. Humidity alert — no cooling call (dehumidifier phase)
-When `high_humidity` input is HIGH but **no** cooling call is active:
+### 7. Humidity alert — soft dehumidification (humidistat + indoor RH below low threshold)
+When `high_humidity` input is HIGH, **no** cool/heat call is active, AND
+indoor RH is below the first-level (low) threshold
+(`SensorFlags.humidityModerate` is FALSE):
 - Turn on `dehumidifier`
 - Turn on `fan` (air handler moves conditioned air past dehumidifier outlet)
 - Do **not** run `low_cool` or `high_cool` (dehumidifier warm-air outlet feeds
@@ -86,12 +88,36 @@ When `high_humidity` input is HIGH but **no** cooling call is active:
   simultaneously would heat the coils)
 - Record the time the dehumidifier turned on (`dehumStartMs`)
 
+### 7b. Humidity alert — moderate band (humidistat + indoor RH between thresholds)
+When `high_humidity` input is HIGH, **no** cool/heat call is active, and
+indoor RH is in the moderate band (≥ low threshold, < high threshold —
+`SensorFlags.humidityModerate` TRUE, `humidityHigh` FALSE):
+- Same outputs as rule 7 (dehumidifier + fan only).  The dehumidifier
+  might not keep up, but the emergency rule (rule 8b) hasn't tripped yet.
+  The timeout safety (rule 8) will catch a real failure.
+
 ### 8. Humidity alert — dehumidifier timeout
-If the dehumidifier has been running (per rule 7) for at least
+If the dehumidifier has been running (per rule 7 / 7b) for at least
 `cfg.dehumMaxMinutes` (default 20 minutes) and `high_humidity` is still HIGH:
 - Turn off `dehumidifier`
 - Call `high_cool` until `high_humidity` clears
 - Once `high_humidity` goes LOW, return to idle (rule 14)
+
+### 8b. Indoor humidity emergency (indoor RH at or above high threshold)
+When `SensorFlags.humidityHigh` is TRUE (indoor RH ≥
+`cfg.indoor_humidity_high_pct`, default 65%) — regardless of the humidistat
+input and regardless of any cooling thermostat call — the system forces
+high cool:
+- Turn on `high_cool`
+- Turn on `fan`
+- Turn off `dehumidifier` (mutual exclusion — rule 9)
+- `reversing_valve` de-energized (cooling)
+
+This is the emergency dehumidification path.  Indoor RH high enough to
+trip this threshold means the dehumidifier alone is no longer sufficient,
+and the AC's condenser coil is the most effective moisture-removal
+device available.  Heat calls still take precedence over this rule
+(unusual to have very high indoor humidity while heating).
 
 ### 9. Mutual exclusion — dehumidifier and compressor
 - When `dehumidifier` is ON: `low_cool` and `high_cool` must both be OFF.
