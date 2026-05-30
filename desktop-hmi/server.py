@@ -602,6 +602,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="HVAC HMI", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+@app.middleware("http")
+async def no_cache_for_html_and_static(request, call_next):
+    """Avoid stale UI after server-side edits — the HMI is a small
+    single-user dev app, so we don't want any caching on / or /static/."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 
 @app.get("/")
 async def root():
