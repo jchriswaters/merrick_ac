@@ -55,21 +55,32 @@ When `SensorFlags.auxHeatNeeded` is true (outdoor < configurable 40 °F threshol
 - The compressor breaker and the aux heater breaker are separately sized to
   handle simultaneous operation.
 
-### 5. Cool call — no humidity alert
-When the main thermostat calls for cooling and `high_humidity` input is LOW:
+### 5. Cool call — stage 1 (Y1 only, no humidity alert)
+When the main thermostat asserts only **Y1** (`input_main_low_cool`) and
+`input_high_humidity` is LOW:
 - Call `low_cool`
 - Turn on `fan`
 - `reversing_valve` remains de-energized (B-type = cooling)
 
-### 6. Cool call — humidity alert active
-When the main thermostat calls for cooling and `high_humidity` input is HIGH:
-- Call `high_cool` (the Mitsubishi variable-speed compressor requires high stage
-  to achieve meaningful moisture removal; low stage is ineffective for dehumidification)
+### 6. Cool call — stage 2 (Y2 asserted, OR humidity alert)
+When the main thermostat asserts **Y2** (`input_main_high_cool`), high-stage
+cooling engages regardless of humidity.  A standard 2-stage thermostat
+asserts Y1 first and then adds Y2 when stage 1 isn't keeping up — so Y2
+implies "I need more cooling than Y1 alone provides."
+
+Stage 2 also engages on `high_humidity` even with only Y1 active — the
+Mitsubishi variable-speed compressor needs the high stage to achieve
+meaningful moisture removal; low stage is ineffective for dehumidification.
+
+In either case:
+- Call `high_cool` (high-stage compressor)
 - Turn on `fan`
 - `reversing_valve` remains de-energized
 
-### 7. Humidity alert — no cooling call (dehumidifier phase)
-When `high_humidity` input is HIGH but **no** cooling call is active:
+### 7. Humidity alert — soft dehumidification (humidistat + indoor RH below low threshold)
+When `high_humidity` input is HIGH, **no** cool/heat call is active, AND
+indoor RH is below the first-level (low) threshold
+(`SensorFlags.humidityModerate` is FALSE):
 - Turn on `dehumidifier`
 - Turn on `fan` (air handler moves conditioned air past dehumidifier outlet)
 - Do **not** run `low_cool` or `high_cool` (dehumidifier warm-air outlet feeds
@@ -77,12 +88,36 @@ When `high_humidity` input is HIGH but **no** cooling call is active:
   simultaneously would heat the coils)
 - Record the time the dehumidifier turned on (`dehumStartMs`)
 
+### 7b. Humidity alert — moderate band (humidistat + indoor RH between thresholds)
+When `high_humidity` input is HIGH, **no** cool/heat call is active, and
+indoor RH is in the moderate band (≥ low threshold, < high threshold —
+`SensorFlags.humidityModerate` TRUE, `humidityHigh` FALSE):
+- Same outputs as rule 7 (dehumidifier + fan only).  The dehumidifier
+  might not keep up, but the emergency rule (rule 8b) hasn't tripped yet.
+  The timeout safety (rule 8) will catch a real failure.
+
 ### 8. Humidity alert — dehumidifier timeout
-If the dehumidifier has been running (per rule 7) for at least
+If the dehumidifier has been running (per rule 7 / 7b) for at least
 `cfg.dehumMaxMinutes` (default 20 minutes) and `high_humidity` is still HIGH:
 - Turn off `dehumidifier`
 - Call `high_cool` until `high_humidity` clears
 - Once `high_humidity` goes LOW, return to idle (rule 14)
+
+### 8b. Indoor humidity emergency (indoor RH at or above high threshold)
+When `SensorFlags.humidityHigh` is TRUE (indoor RH ≥
+`cfg.indoor_humidity_high_pct`, default 65%) — regardless of the humidistat
+input and regardless of any cooling thermostat call — the system forces
+high cool:
+- Turn on `high_cool`
+- Turn on `fan`
+- Turn off `dehumidifier` (mutual exclusion — rule 9)
+- `reversing_valve` de-energized (cooling)
+
+This is the emergency dehumidification path.  Indoor RH high enough to
+trip this threshold means the dehumidifier alone is no longer sufficient,
+and the AC's condenser coil is the most effective moisture-removal
+device available.  Heat calls still take precedence over this rule
+(unusual to have very high indoor humidity while heating).
 
 ### 9. Mutual exclusion — dehumidifier and compressor
 - When `dehumidifier` is ON: `low_cool` and `high_cool` must both be OFF.
@@ -96,18 +131,22 @@ The main thermostat is the sole authority over the Unico unit. Secondary zone
 thermostats (theater, downstairs) **only** open or close their room damper —
 they never change what the compressor or fan does.
 
-The **default damper state is open**. A secondary zone damper closes only when
-that zone is actively requesting the opposite of what the main thermostat is
-currently running. This prevents forcing unwanted hot or cold air into a room
-while still allowing conditioned air to circulate freely to satisfied rooms.
+While the Unico is actively heating or cooling, a secondary zone damper
+opens **only** if that zone is actively calling for the SAME mode the main
+thermostat is driving. Any zone that isn't asking for the current mode —
+whether it's silent (room already at temperature) or asking for the
+opposite direction — gets its damper closed. This concentrates the
+conditioned airflow into the rooms that actually want it.
 
 | Secondary zone state | Main unit mode | Damper action |
 |----------------------|----------------|---------------|
-| Not calling (satisfied) | Any          | **Open** |
-| Calling heat         | Heating        | **Open** |
-| Calling cool         | Cooling        | **Open** |
-| Calling heat         | Cooling        | **Closed** |
-| Calling cool         | Heating        | **Closed** |
+| Calling heat            | Heating       | **Open** |
+| Calling cool            | Cooling       | **Open** |
+| Calling heat            | Cooling       | **Closed** |
+| Calling cool            | Heating       | **Closed** |
+| Not calling (satisfied) | Heating       | **Closed** |
+| Not calling (satisfied) | Cooling       | **Closed** |
+| Any                     | Idle / fan-only | **Open** (whole-house circulation) |
 
 Theater damper is also gated by `cfg.theaterEnabled` — if the theater zone is
 disabled in config, its damper stays open unconditionally.
@@ -149,9 +188,19 @@ space). Maximize fresh air intake subject to constraints:
 1. `low_cool`, `high_cool`, and `high_heat` are **mutually exclusive** with each
    other — only one may be active at a time. `high_heat` (aux electric) may run
    simultaneously with heat pump stages during cold-weather heating (rule 4).
-2. A **180-second lockout** follows any compressor mode change. No further mode
-   change is permitted during this window.
-3. `reversing_valve` is de-energized whenever the system is in cooling mode or
+2. **Mode-reversal interlock (180 s).**  Restarting the heat-pump compressor
+   in the **opposite direction** (cooling↔heating) within 180 s of the last
+   stop is blocked, to give the reversing valve and refrigerant pressures
+   time to equalize.  Restarting in the **same direction** is allowed
+   immediately — the silent-then-on-again case doesn't risk the compressor.
+   Live stage changes (low_cool ↔ high_cool while running) do not stop the
+   compressor and are therefore never subject to the timer.
+3. **Mode-reversal-while-running guard.**  If the reversing valve must
+   change direction while the compressor is still spinning, the firmware
+   forces the compressor off immediately and holds the valve in its current
+   position.  The mode-reversal interlock above then gates the restart in
+   the new direction.
+4. `reversing_valve` is de-energized whenever the system is in cooling mode or
    fully off (B-type wiring confirmed for this installation).
-4. All output pins are driven LOW in `setup()` before any logic runs to prevent
+5. All output pins are driven LOW in `setup()` before any logic runs to prevent
    relay chatter on power-up.

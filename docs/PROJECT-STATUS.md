@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-05-28
+Last updated: 2026-05-30
 
 ---
 
@@ -55,6 +55,23 @@ codebase or pasting a transcript.
   adding the humidistat switches to high_cool.  MCU RPCs
   `set_input_override` / `get_input_override` added.
 - Desktop HMI **staleness indicator** on sensor cards — DONE.
+- Desktop HMI **System Settings panel** — DONE.  All 7 configurable
+  parameters (heat-pump min temp, free-cool max, humidity vent limit,
+  dehum max minutes, vent min/hour, theater enable, mode override)
+  editable from the HMI; writes via WebSocket → mosquitto_pub to
+  `home/hvac/cmd`; bridge daemon validates, persists, and republishes
+  to `home/hvac/config`.  Persistence now writes to
+  `~/.config/hvac/config.json` (the previous `/etc/hvac/...` path failed
+  silently — the service runs as `arduino`, not root).
+- Damper logic rewritten (rule 10): rooms that aren't actively calling
+  for the current mode get their damper closed, not held open.
+- Compressor interlock rewritten (rule 2 in §"Safety interlocks"):
+  3-min lockout applies **only** to direction reversals (cool↔heat);
+  same-direction restarts and live stage changes have no penalty.
+- "Heat Pump" hero card now derives `compressor_on` from live RPC
+  outputs (low_cool ∥ high_cool) instead of the 10 s-stale SDM120
+  current reading.  Indoor / outdoor humidity rendered at the same
+  size as the temperature value.
 
 **Pending / not yet verified:**
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not

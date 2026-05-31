@@ -4,7 +4,14 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify so we can use the systemd watchdog: bridge_daemon calls
+# sd_notify("READY=1") once it enters its polling loop and sd_notify(
+# "WATCHDOG=1") on every iteration.  If the loop ever blocks (deadlock,
+# RS485 lockup, MQTT thread wedged) for longer than WatchdogSec, systemd
+# kills + restarts us via the Restart=always policy below.
+Type=notify
+WatchdogSec=60
+NotifyAccess=main
 User=arduino
 WorkingDirectory=/home/arduino/hvac-controller/linux
 
