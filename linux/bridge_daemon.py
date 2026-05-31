@@ -144,6 +144,12 @@ DEFAULT_CONFIG: dict = {
     "dehum_max_minutes":        20,            # dehumidifier timeout before forced high_cool
     "mcu_hang_threshold_s":     60,            # seconds of MCU silence before publishing mcu_healthy=False
     "mcu_auto_recover":         False,         # if True (and sudoers allows), restart arduino-router after threshold
+    # Cloud MQTT — dual-publish to a remote broker for Snowflake ingestion.
+    # Uses the public HiveMQ broker (no auth) by default.
+    "cloud_mqtt_enabled": True,
+    "cloud_mqtt_host":    "broker.hivemq.com",
+    "cloud_mqtt_port":    1883,
+    "cloud_mqtt_topic":   "jchriswaters_merrick_ac",
 }
 
 # Allowed keys, (min, max, type) — None = no range check
@@ -823,6 +829,40 @@ def run() -> None:
 
     mqtt_client.loop_start()   # handles reconnection automatically in a background thread
 
+    # ── Cloud MQTT client (dual-publish for Snowflake pipeline) ───
+    # Publishes the same status payload to a cloud broker so the
+    # mqtt-to-snowflake service on GCP can pick it up.
+    # Uses the public HiveMQ broker — no auth, fire-and-forget QoS 0.
+    cloud_client: Optional[mqtt.Client] = None
+    if cfg.get("cloud_mqtt_enabled", True):
+        cloud_host  = cfg.get("cloud_mqtt_host",  "broker.hivemq.com")
+        cloud_port  = int(cfg.get("cloud_mqtt_port", 1883))
+
+        cloud_client = mqtt.Client(
+            client_id=f"merrick-ac-{int(time.time())}",
+            clean_session=True,
+        )
+        cloud_client.reconnect_delay_set(min_delay=10, max_delay=120)
+
+        def on_cloud_connect(client, userdata, flags, rc):
+            if rc == 0:
+                log.info("Cloud MQTT connected to %s:%d", cloud_host, cloud_port)
+            else:
+                log.warning("Cloud MQTT connect failed (rc=%d) — will retry", rc)
+
+        def on_cloud_disconnect(client, userdata, rc):
+            if rc != 0:
+                log.warning("Cloud MQTT disconnected (rc=%d) — will reconnect", rc)
+
+        cloud_client.on_connect    = on_cloud_connect
+        cloud_client.on_disconnect = on_cloud_disconnect
+
+        try:
+            cloud_client.connect(cloud_host, cloud_port, keepalive=60)
+            cloud_client.loop_start()
+        except Exception as exc:
+            log.warning("Cloud MQTT initial connect failed: %s — will retry in background", exc)
+
     # Push initial config to MCU before entering the polling loop
     with cfg_lock:
         push_config_to_mcu(cfg)
@@ -956,16 +996,22 @@ def run() -> None:
         except Exception as exc:
             log.debug("Status cache write failed: %s", exc)
 
-        # ── Publish MQTT status (retained) ─────────────────────
-        try:
-            mqtt_client.publish(MQTT_STATUS, json.dumps(payload), retain=True, qos=0)
-            log.info("Status → mode=%-10s  indoor=%-5s°F  outdoor=%-5s°F  hum=%-4s%%",
-                     payload["mode"],
-                     f"{indoor_temp_f:.1f}"  if indoor_temp_f   is not None else "?",
-                     f"{outdoor_temp_f:.1f}" if outdoor_temp_f  is not None else "?",
-                     f"{outdoor_humidity:.0f}" if outdoor_humidity is not None else "?")
-        except Exception as exc:
-            log.error("MQTT publish failed: %s", exc)
+        # ── Publish MQTT status ────────────────────────────────────
+        # Status goes to the cloud broker (HiveMQ) for Snowflake ingestion.
+        # Local mosquitto is kept running but carries only the cmd/config
+        # channels — status is no longer published locally.
+        payload_json = json.dumps(payload)
+        log.info("Status → mode=%-10s  indoor=%-5s°F  outdoor=%-5s°F  hum=%-4s%%",
+                 payload["mode"],
+                 f"{indoor_temp_f:.1f}"  if indoor_temp_f   is not None else "?",
+                 f"{outdoor_temp_f:.1f}" if outdoor_temp_f  is not None else "?",
+                 f"{outdoor_humidity:.0f}" if outdoor_humidity is not None else "?")
+        if cloud_client:
+            cloud_topic = cfg_snap.get("cloud_mqtt_topic", "jchriswaters_merrick_ac")
+            try:
+                cloud_client.publish(cloud_topic, payload_json, qos=0, retain=False)
+            except Exception as exc:
+                log.warning("Cloud MQTT publish failed: %s", exc)
 
         # ── Sleep for the remainder of the poll interval ───────
         elapsed = time.monotonic() - loop_start
