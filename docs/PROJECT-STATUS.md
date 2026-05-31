@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-05-30
+Last updated: 2026-05-31
 
 ---
 
@@ -37,7 +37,7 @@ codebase or pasting a transcript.
 
 ---
 
-## Current status (2026-05-27)
+## Current status (2026-05-31)
 
 **Working:**
 - MCU sketch runs; RPC methods `get_outputs` / `get_inputs` / `set_flags` /
@@ -55,23 +55,62 @@ codebase or pasting a transcript.
   adding the humidistat switches to high_cool.  MCU RPCs
   `set_input_override` / `get_input_override` added.
 - Desktop HMI **staleness indicator** on sensor cards — DONE.
-- Desktop HMI **System Settings panel** — DONE.  All 7 configurable
-  parameters (heat-pump min temp, free-cool max, humidity vent limit,
-  dehum max minutes, vent min/hour, theater enable, mode override)
-  editable from the HMI; writes via WebSocket → mosquitto_pub to
+- Desktop HMI **System Settings panel** — DONE.  All 12 configurable
+  parameters editable from the HMI (see full list in bridge_daemon
+  `SETCONFIG_SCHEMA`); writes via WebSocket → mosquitto_pub to
   `home/hvac/cmd`; bridge daemon validates, persists, and republishes
   to `home/hvac/config`.  Persistence now writes to
   `~/.config/hvac/config.json` (the previous `/etc/hvac/...` path failed
   silently — the service runs as `arduino`, not root).
-- Damper logic rewritten (rule 10): rooms that aren't actively calling
-  for the current mode get their damper closed, not held open.
-- Compressor interlock rewritten (rule 2 in §"Safety interlocks"):
-  3-min lockout applies **only** to direction reversals (cool↔heat);
-  same-direction restarts and live stage changes have no penalty.
-- "Heat Pump" hero card now derives `compressor_on` from live RPC
-  outputs (low_cool ∥ high_cool) instead of the 10 s-stale SDM120
-  current reading.  Indoor / outdoor humidity rendered at the same
-  size as the temperature value.
+- Damper logic rewritten (rule 10): secondary zone dampers close when
+  their thermostat is calling the opposite of the main mode.  Open
+  during idle/fan-only for whole-house circulation.  Verified on hardware.
+- Compressor interlock: 3-minute anti-short-cycle timer starts whenever
+  the compressor turns off.  Any off→on restart is blocked during
+  the lockout.  A separate **mode-reversal guard** cuts the compressor
+  immediately when cool↔heat direction would change while running, then
+  the anti-short-cycle timer protects the restart in the new direction.
+  Live stage changes (low_cool ↔ high_cool) never stop the compressor
+  and are not subject to the timer.
+- "Heat Pump" hero card derives `compressor_on` from live RPC outputs
+  (low_cool ∥ high_cool) instead of the 10 s-stale SDM120 current
+  reading.  Indoor / outdoor humidity rendered at the same size as the
+  temperature value.
+- **Indoor-RH-driven humidity control** — DONE.  Three-mode logic
+  (verified on hardware):
+    1. Y2 high-cool call → `high_cool`, dehumidifier off (cool takes over).
+    2. Humidistat ON + indoor RH below low threshold → dehumidifier + fan
+       only (no compressor).
+    3. Indoor RH ≥ high threshold → `high_cool` regardless of humidistat
+       or thermostat (emergency dehumidification via cooling coil).
+  Two new indoor-RH SensorFlags push-computed by Linux side:
+  `humidityModerate` and `humidityHigh`.  `set_flags` RPC now takes
+  **7 bools** (was 5).  Two new config params in Settings panel:
+  `indoor_humidity_low_pct` (default 55 %) and
+  `indoor_humidity_high_pct` (default 65 %).  See `docs/control-logic.md`
+  rules 7, 7b, 8, 8b for full detail.
+- **Downstairs zone toggle** — DONE.  `downstairs_enabled` config flag
+  (default `true`, mirrors `theater_enabled`) added to Settings panel.
+  When disabled, the downstairs damper is held permanently open regardless
+  of thermostat calls.  `rpc_set_config` now takes **5 args** (was 4);
+  bridge, MCU, and HMI all updated.  Verified on hardware: cooling +
+  downstairs enabled closes the downstairs damper; flipping to false holds
+  it open.
+- **Linux-side watchdog** — DONE.  `hvac-bridge.service` now uses
+  `Type=notify` + `WatchdogSec=60`; bridge daemon calls `sd_notify
+  READY=1` on entry and `WATCHDOG=1` every polling cycle.  If the loop
+  ever hangs, systemd kills and restarts the service automatically.
+- **MCU hang detection** — DONE.  Bridge daemon tracks the timestamp of
+  the last successful MCU RPC read and publishes `mcu_healthy` (bool) and
+  `mcu_silence_s` (int) in every MQTT status payload.  Two new config
+  knobs in Settings panel: `mcu_hang_threshold_s` (default 60 s) and
+  `mcu_auto_recover` (default false).  When silence exceeds the threshold,
+  an ERROR is logged; if auto-recover is enabled, the bridge attempts
+  `systemctl restart arduino-router` (throttled to one attempt per 2 min)
+  to cycle the MCU SRST line.  Requires a sudoers entry — see
+  `docs/deployment.md §1.7a`.  HMI connection indicator gains an **amber**
+  state ("MCU unresponsive") distinct from the red "controller unreachable"
+  state.
 
 **Pending / not yet verified:**
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not
@@ -126,6 +165,17 @@ cost real debugging time to discover.  Detail in `docs/deployment.md`.
    forces inputs through the same control logic as real thermostat calls,
    so a forced cool call energizes the compressor.  Safety interlocks
    still apply.  Override state is volatile (cleared on MCU reset).
+
+9. **`set_flags` takes 7 bools, not 5.**  The indoor-RH humidity rewrite
+   added `humidityModerate` and `humidityHigh` as args 6–7.  If you flash
+   a pre-rewrite MCU sketch, the bridge will silently push 7 args to an
+   RPC that only accepts 5, and the last two flags will be ignored — the
+   controller will fall back to its humidistat-only logic.  Always flash
+   the sketch from the same commit as the bridge daemon.
+
+10. **`rpc_set_config` takes 5 args, not 4.**  The downstairs zone toggle
+    added `downstairsEnabled` as arg 5.  Same cross-version mismatch risk
+    as above — keep MCU sketch and bridge_daemon in sync.
 
 ---
 
