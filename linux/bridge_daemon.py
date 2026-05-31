@@ -754,9 +754,14 @@ def run() -> None:
         log.warning("arduino.app_utils not available — MCU Bridge disabled")
 
     # ── RS485 Modbus client ────────────────────────────────────
-    modbus: Optional[ModbusSerialClient] = None
-    if ModbusSerialClient is not None:
-        modbus = ModbusSerialClient(
+    # _modbus_connect() is also called each polling cycle when modbus is
+    # None, so a missing ttyUSB0 at startup (hub not yet enumerated) or a
+    # temporary disconnect is recovered automatically without restarting
+    # the service.
+    def _modbus_connect() -> Optional["ModbusSerialClient"]:
+        if ModbusSerialClient is None:
+            return None
+        client = ModbusSerialClient(
             port=RS485_PORT,
             baudrate=RS485_BAUD,
             stopbits=1,
@@ -764,11 +769,17 @@ def run() -> None:
             parity="N",
             timeout=RS485_TIMEOUT,
         )
-        if modbus.connect():
+        if client.connect():
             log.info("RS485 Modbus connected on %s @ %d baud", RS485_PORT, RS485_BAUD)
+            return client
         else:
-            log.error("RS485 Modbus failed to connect on %s", RS485_PORT)
-            modbus = None
+            log.error("RS485 Modbus failed to connect on %s — will retry next cycle",
+                      RS485_PORT)
+            return None
+
+    modbus: Optional[ModbusSerialClient] = None
+    if ModbusSerialClient is not None:
+        modbus = _modbus_connect()
     else:
         log.warning("pymodbus not available — RS485 sensor reads disabled")
 
@@ -871,6 +882,12 @@ def run() -> None:
                 _try_recover_mcu()
 
         # ── Read RS485 sensors ─────────────────────────────────
+        # If the port was missing at startup or was lost mid-run (e.g. hub
+        # power-cycled), try to reconnect before the reads.  One attempt per
+        # cycle; on success the client is reused for all subsequent cycles.
+        if modbus is None:
+            modbus = _modbus_connect()
+
         indoor_temp_f       = None
         indoor_humidity     = None
         outdoor_temp_f      = None
@@ -896,6 +913,18 @@ def run() -> None:
             dehum_power = read_sdm120(modbus, ADDR_SDM120_DEHUM, "dehum")
             if dehum_power:
                 payload.update(dehum_power)
+
+            # If both SHT30s failed, the port may have gone away mid-run
+            # (e.g. hub unplugged).  Close the client so the next cycle
+            # triggers a fresh reconnect attempt via _modbus_connect().
+            if indoor is None and outdoor is None:
+                try:
+                    modbus.close()
+                except Exception:
+                    pass
+                modbus = None
+                log.warning("Both SHT30 reads failed — closing Modbus client; "
+                            "will attempt reconnect next cycle")
 
         # ── Compute and push SensorFlags to MCU ───────────────
         flags = compute_sensor_flags(
