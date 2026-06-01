@@ -19,6 +19,7 @@ Point Claude at the relevant doc(s) instead of pasting chat history:
 - Bill of materials / wiring → `docs/component-list.md`, `docs/system-design.md` §4
 - MQTT schema → `docs/mqtt-payload-spec.md`
 - Desktop HMI app → `desktop-hmi/README.md`
+- NCD WiFi current monitor → `docs/ncd-current-monitor.md`
 - This file → current state + decisions
 
 A focused doc read is far cheaper (time + tokens) than re-exploring the
