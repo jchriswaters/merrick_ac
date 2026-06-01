@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-05-31 (evening)
+Last updated: 2026-06-01
 
 ---
 
@@ -121,6 +121,11 @@ codebase or pasting a transcript.
   state.
 
 **Pending / not yet verified:**
+- **NCD WiFi AC Current Monitor** — ordered/installed but not yet integrated
+  into the data pipeline.  Web config at `http://ncd-1ec4.local/`; configure
+  to publish JSON to `broker.hivemq.com:1883` on a dedicated topic (e.g.
+  `jchriswaters_merrick_ac_current`).  See `docs/component-list.md` §WiFi
+  Current Monitoring for full specs and wiring notes.
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not
   yet returning data.
 - SDM120 dehumidifier meter (0x04) — same.
@@ -221,9 +226,13 @@ sim/         offline simulator + sensor bench tools
 
 ## Open questions / future work
 
+- **NCD WiFi current monitor** — configure via `http://ncd-1ec4.local/` to
+  publish to HiveMQ; verify messages arriving in Snowflake under the new topic.
 - Wire + verify the two SDM120 power meters.
 - Add `NOPASSWD` sudoers entry for `arduino` user to allow remote service
   restarts (needed for MCU auto-recover and remote `systemctl restart`):
   `arduino ALL=(ALL) NOPASSWD: /bin/systemctl restart hvac-bridge, /bin/systemctl restart arduino-router`
 - Verify Snowflake pipeline is receiving `jchriswaters_merrick_ac` messages
   from HiveMQ now that bridge_daemon publishes there.
+  See `mqtt-to-snowflake/TROUBLESHOOTING.md` for how to trigger a manual flush
+  and query Snowflake to confirm records landed.
