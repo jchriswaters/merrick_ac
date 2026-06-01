@@ -128,6 +128,26 @@ existing HVAC thermostat wiring — no AC-DC conversion module required.
 
 ---
 
+## WiFi Current Monitoring
+
+A standalone WiFi-connected AC current monitor from NCD (National Control Devices).
+Publishes JSON payloads to MQTT over WiFi — no wiring to the controller enclosure
+needed. Powers from the same low-voltage DC supply as the rest of the system.
+
+| Qty | Component | Specifications | Notes |
+|-----|-----------|----------------|-------|
+| 1 | **NCD AC Current Monitor — WiFi MQTT** | AC current measurement via split-core CT. WiFi 802.11 b/g/n 2.4 GHz. Supply: **6–32V DC**. IP65 weatherproof housing. Configurable sampling interval and MQTT topic via built-in web interface. Publishes JSON payload containing current reading (A), voltage (if measured), and timestamp. | Product: [store.ncd.io/product/ac-current-monitor-sensor-for-mqtt-over-wifi/](https://store.ncd.io/product/ac-current-monitor-sensor-for-mqtt-over-wifi/). Power from the 12V DIN-rail supply. No RS485 wiring — only power and WiFi. |
+
+**Configuration:**
+- Web interface accessible at **`http://ncd-1ec4.local/`** (mDNS hostname) on the local WiFi network
+- From the web UI, set the target MQTT broker address/port and topic name
+- For this installation, configure to publish to: `broker.hivemq.com:1883`, topic `jchriswaters_merrick_ac_current` (or a dedicated NCD topic)
+- Adjustable publish interval — set to match the bridge_daemon polling cycle (10 s) or longer
+
+**Integration note:** The NCD sensor publishes independently to MQTT — the bridge_daemon does not poll it. Its readings appear in the cloud MQTT stream alongside the controller's status payloads. Power the unit from the 12V rail inside the enclosure via a cable gland; the CT clamp installs non-invasively around the monitored AC wire.
+
+---
+
 ## Local HMI Display
 
 A standalone touchscreen panel on the same WiFi network. Communicates with the
