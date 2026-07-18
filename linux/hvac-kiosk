@@ -2,11 +2,4 @@
 xset s off
 xset s noblank
 xset -dpms
-exec /usr/bin/chromium \
-    --kiosk \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --no-first-run \
-    --incognito \
-    http://127.0.0.1:8000
+exec /usr/bin/chromium --kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble --no-first-run --incognito http://127.0.0.1:8000
