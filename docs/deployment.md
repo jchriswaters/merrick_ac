@@ -439,6 +439,81 @@ If this file is missing on the board, create it at
 
 ---
 
+## 6. Kiosk display on an attached monitor
+
+The controller can drive a monitor connected via USB-C → HDMI on the USB hub,
+showing the HMI full-screen with no keyboard or browser chrome.  A USB mouse
+plugged into the hub works for navigation.
+
+### 6.1 Hardware requirements
+
+- USB hub with an HDMI output port (e.g. the Battony 3-in-1 USB-C hub or
+  equivalent multiport adapter with HDMI + USB-A ports)
+- HDMI cable + monitor
+- Optionally a USB mouse (no keyboard needed)
+
+The Uno Q's USB-C port outputs DisplayPort Alt Mode, which the hub converts to
+HDMI.  The same USB-C connection also carries USB host data for the RS485
+dongle, so both video and sensor data run through the single USB-C port.
+
+### 6.2 Software install (first time only)
+
+```bash
+# SSH to the controller
+ssh arduino@192.168.1.197
+
+# Install Xorg modesetting driver (fbdev is pre-installed on the Uno Q image)
+sudo apt-get install -y xserver-xorg-video-modesetting
+
+# Install the kiosk launcher script
+sudo cp ~/hvac-controller/linux/hvac-kiosk /usr/local/bin/hvac-kiosk
+sudo chmod +x /usr/local/bin/hvac-kiosk
+
+# Register it as an X session type
+sudo cp ~/hvac-controller/linux/hvac-kiosk.desktop /usr/share/xsessions/hvac-kiosk.desktop
+
+# Configure lightdm to auto-login arduino into the kiosk session
+sudo mkdir -p /etc/lightdm/lightdm.conf.d
+sudo cp ~/hvac-controller/linux/99-hvac-kiosk.conf /etc/lightdm/lightdm.conf.d/99-hvac-kiosk.conf
+
+# Restart the display manager — the monitor should show the HMI within ~10 s
+sudo systemctl restart lightdm
+```
+
+### 6.3 Verify
+
+```bash
+# Chromium should be running
+pgrep -a chromium | head -3
+
+# Any startup errors (mostly benign)
+tail -20 ~/.xsession-errors
+```
+
+### 6.4 Troubleshooting
+
+**Monitor shows nothing:**
+- Run `cat /sys/class/drm/card0-DP-1/status` — must say `connected`.
+  If it says `disconnected`, the hub or cable isn't seated.
+- Run `ls /dev/fb0` — must exist.  If missing, the ANX7625 DP Alt Mode bridge
+  hasn't initialised; reseating the USB-C hub cable usually fixes this.
+
+**"This site can't be reached" in Chromium:**
+- Use `http://127.0.0.1:8000` (not `localhost`) — `localhost` resolves to IPv6
+  `::1` first, but the HMI only listens on IPv4.  The kiosk script already uses
+  `127.0.0.1`.
+- Check `systemctl is-active hvac-hmi`.
+
+**Display goes black / screen saver:**
+- `xset s off; xset -dpms` in the kiosk script suppresses this.
+  If it still blanks, check that lightdm restarted after the config was installed.
+
+**Session reverts to login greeter:**
+- Verify `/etc/lightdm/lightdm.conf.d/99-hvac-kiosk.conf` exists and contains
+  `autologin-user=arduino`.
+
+---
+
 ## 4. Updating the sketch later
 
 After the initial provisioning, an iterative update is just:

@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=HVAC Kiosk
+Comment=HVAC HMI Kiosk Session
+Exec=/usr/local/bin/hvac-kiosk
+Type=Application
