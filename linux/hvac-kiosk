@@ -1,5 +1,46 @@
 #!/bin/bash
+# Industrial-style kiosk: waits for HMI on boot, auto-restarts Chromium on crash,
+# and kills/restarts Chromium whenever the HMI service goes down and comes back up.
+
 xset s off
 xset s noblank
 xset -dpms
-exec /usr/bin/chromium --kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble --no-first-run --incognito http://127.0.0.1:8000
+
+HMI_URL=http://127.0.0.1:8000
+
+# Wait for the HMI server to be ready before launching Chromium.
+# This handles the race between lightdm autologin and hvac-hmi.service startup.
+until curl -sf "$HMI_URL" > /dev/null 2>&1; do
+    sleep 2
+done
+
+# Background watchdog: if the HMI goes down while Chromium is running,
+# wait for it to come back, then kill Chromium so the main loop below
+# relaunches it cleanly against a live server.
+(
+    while true; do
+        sleep 10
+        if ! curl -sf "$HMI_URL" > /dev/null 2>&1; then
+            # HMI is down -- wait for it to recover
+            until curl -sf "$HMI_URL" > /dev/null 2>&1; do
+                sleep 3
+            done
+            # HMI back up -- kill Chromium so the main loop relaunches it
+            pkill -f "chromium.*127.0.0.1:8000" 2>/dev/null
+        fi
+    done
+) &
+WATCHDOG_PID=$!
+
+# Main loop: Chromium runs here. If it exits for any reason (crash, killed
+# by watchdog, OOM) it is restarted. Loop also re-waits for HMI readiness
+# in case of a bridge restart.
+while true; do
+    /usr/bin/chromium --kiosk --noerrdialogs --disable-infobars \
+        --disable-session-crashed-bubble --no-first-run --incognito \
+        "$HMI_URL"
+    sleep 3
+    until curl -sf "$HMI_URL" > /dev/null 2>&1; do
+        sleep 2
+    done
+done
