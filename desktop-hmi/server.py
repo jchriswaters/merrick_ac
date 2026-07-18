@@ -1,27 +1,24 @@
 """
-HVAC Controller — Desktop HMI
+HVAC Controller — HMI server
 
-Runs locally on your laptop, opens a single persistent SSH connection
-to the Uno Q, and serves a real-time web HMI showing the live state of
-all 9 inputs and 9 outputs.  Updates push to the browser over WebSocket.
+Two operating modes controlled by "local_mode" in config.json:
 
-Usage:
-    pip install -r requirements.txt
-    python server.py
-    # then open http://localhost:8000 in any browser
+LOCAL MODE  (runs on the controller itself — recommended)
+    python server.py          # serves on 0.0.0.0:8000
+    Access from any browser on the LAN: http://192.168.1.197:8000
 
-Architecture:
-    Browser  <---WebSocket--->  this server  <---SSH direct-streamlocal--->
-        arduino-router.sock on the Uno Q (msgpack-RPC)
+    RPC calls go directly to /var/run/arduino-router.sock (no SSH).
+    MQTT status is read by running mosquitto_sub locally.
+    No paramiko required.
 
-    SSH "direct-streamlocal@openssh.com" channels let us connect through
-    SSH directly to the controller's Unix socket without uploading any
-    helper scripts — every RPC call is a fresh channel on the same SSH
-    transport, so it's fast (no new TCP/auth per call).
+REMOTE MODE (runs on a laptop, connects to the controller over SSH)
+    Set "local_mode": false in config.json.
+    The server opens one persistent SSH connection, uploads a helper
+    script to /tmp/hmi_rpc.py, and batches RPC calls through it
+    (AllowStreamLocalForwarding=no on the Uno Q prevents direct-streamlocal).
 
-Inputs and outputs are read via the MCU's get_inputs / get_outputs RPCs.
-Sensor temperature/humidity is grabbed from the bridge daemon's MQTT
-retained status message via mosquitto_sub (only updates every 10 s).
+In both modes the browser talks WebSocket to this server; the server
+polls every poll_interval_s and broadcasts state updates.
 """
 
 from __future__ import annotations
@@ -29,7 +26,8 @@ import asyncio
 import json
 import logging
 import os
-import socket
+import socket as _socket
+import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -37,10 +35,14 @@ from pathlib import Path
 from typing import Optional
 
 import msgpack
-import paramiko
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+
+try:
+    import paramiko as _paramiko
+except ImportError:
+    _paramiko = None  # not needed in local mode
 
 # ──────────────────────────────────────────────────────────────────────
 # Config
@@ -51,6 +53,9 @@ CONFIG_PATH = HERE / "config.json"
 STATIC_DIR = HERE / "static"
 
 DEFAULT_CONFIG = {
+    # Set true when this server runs ON the controller (recommended).
+    # False = laptop/remote mode — requires SSH credentials below.
+    "local_mode": False,
     "controller_host": "192.168.1.197",
     "controller_user": "arduino",
     "controller_password": "piragua827",
@@ -100,6 +105,26 @@ INPUTS = [
     ("input_downstairs_heat",    "Downstairs W",   "Downstairs thermostat - heat call"),
     ("input_high_humidity",      "Humidistat",     "External humidity controller alarm"),
     ("input_vent_in",            "Vent Timer",     "External humidity controller vent timer"),
+]
+
+# Editable system settings.  Must match SETCONFIG_SCHEMA in
+# linux/bridge_daemon.py — the bridge validates inbound setConfig
+# commands against its own schema.  The UI reads min/max/unit from here
+# to render the input controls.
+CONFIG_FIELDS = [
+    # (key,                       label,                                unit, kind,         min, max, choices,        help)
+    ("heat_pump_min_temp_f",      "Heat pump min outdoor temp",         "°F", "int",         20,  60, None,           "Auxiliary electric heat engages when outdoor temperature is below this."),
+    ("free_cool_max_temp_f",      "Free-cooling max outdoor temp",      "°F", "int",         40,  80, None,           "Fresh-air vent opens for free cooling when outdoor temperature is below this."),
+    ("high_humidity_pct",         "Outdoor humidity vent limit",        "%",  "int",         50, 100, None,           "Fresh-air vent is forced off when outdoor humidity is at or above this."),
+    ("indoor_humidity_low_pct",   "Indoor humidity (low / soft)",       "%",  "int",         30,  70, None,           "Below this indoor RH, the dehumidifier alone is considered sufficient (humidistat → dehumidifier-only)."),
+    ("indoor_humidity_high_pct",  "Indoor humidity (high / emergency)", "%",  "int",         40,  90, None,           "At or above this indoor RH, force the AC into high cool and turn off the dehumidifier, regardless of the humidistat input."),
+    ("dehum_max_minutes",         "Dehumidifier max runtime",           "min","int",          5, 120, None,           "After this many minutes of dehumidifier-only operation, switch to high cool until humidity clears."),
+    ("vent_minutes_per_hour",     "Fresh-air vent minutes per hour",    "min","int",          0,  60, None,           "How many minutes of every hour the fresh-air vent opens on its internal timer."),
+    ("theater_enabled",           "Theater zone enabled",               "",   "bool",      None,None, None,           "When disabled, the theater damper is held open and the theater thermostat is ignored."),
+    ("downstairs_enabled",        "Downstairs zone enabled",            "",   "bool",      None,None, None,           "When disabled, the downstairs damper is held open and the downstairs thermostat is ignored."),
+    ("mode_override",             "Mode override",                      "",   "enum",      None,None, ["auto","off"], "'off' forces the system into fan-only mode regardless of thermostat calls."),
+    ("mcu_hang_threshold_s",      "MCU hang threshold",                 "s",  "int",         10, 600, None,           "How many seconds of no successful MCU RPC reads before the bridge flags it as unhealthy (and, if auto-recover is on, restarts arduino-router)."),
+    ("mcu_auto_recover",          "MCU auto-recover",                   "",   "bool",      None,None, None,           "When the MCU is unresponsive past the threshold, run `sudo systemctl restart arduino-router` to cycle SRST and reset the MCU. Requires a sudoers entry — see docs/deployment.md."),
 ]
 
 # ──────────────────────────────────────────────────────────────────────
@@ -182,7 +207,7 @@ class ControllerSession:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self._ssh: Optional[paramiko.SSHClient] = None
+        self._ssh = None
         self._lock = asyncio.Lock()
         self.last_error: Optional[str] = None
         self._helper_installed = False
@@ -196,8 +221,10 @@ class ControllerSession:
         return bool(t and t.is_active())
 
     def _connect_sync(self):
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        if _paramiko is None:
+            raise RuntimeError("paramiko not installed — cannot use remote mode")
+        ssh = _paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(_paramiko.AutoAddPolicy())
         ssh.connect(
             self.cfg["controller_host"],
             port=self.cfg["ssh_port"],
@@ -294,12 +321,11 @@ class ControllerSession:
         result = await self.rpc_batch([(method, args or [])], timeout)
         return result.get(method)
 
-    # ---- MQTT status (latest retained message) ----
+    # ---- MQTT retained-topic reads ----
 
-    def _mqtt_status_sync(self, timeout: float = 2.0) -> Optional[dict]:
+    def _mqtt_retained_sync(self, topic: str, timeout: float = 2.0) -> Optional[dict]:
         if not self._is_alive():
             raise RuntimeError("SSH not connected")
-        topic = self.cfg["mqtt_status_topic"]
         # -C 1: exit after one message; -W <sec>: total timeout
         cmd = (
             f"mosquitto_sub -h localhost -t {topic} "
@@ -319,11 +345,194 @@ class ControllerSession:
             return None
         try:
             return await asyncio.get_event_loop().run_in_executor(
-                None, self._mqtt_status_sync, timeout
+                None, self._mqtt_retained_sync,
+                self.cfg["mqtt_status_topic"], timeout
             )
         except Exception as e:
-            log.debug("mosquitto_sub failed: %s", e)
+            log.debug("mosquitto_sub (status) failed: %s", e)
             return None
+
+    async def mqtt_config(self, timeout: float = 2.0) -> Optional[dict]:
+        if not await self.ensure_connected():
+            return None
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._mqtt_retained_sync,
+                self.cfg.get("mqtt_config_topic", "home/hvac/config"), timeout
+            )
+        except Exception as e:
+            log.debug("mosquitto_sub (config) failed: %s", e)
+            return None
+
+    # ---- MQTT publish (setConfig commands) ----
+
+    def _mqtt_publish_sync(self, topic: str, payload: dict, timeout: float = 3.0) -> bool:
+        if not self._is_alive():
+            raise RuntimeError("SSH not connected")
+        # Use stdin to avoid shell-quoting any JSON braces / quotes.
+        cmd = f"mosquitto_pub -h localhost -t {topic} -q 1 -s"
+        stdin, stdout, stderr = self._ssh.exec_command(cmd, timeout=timeout)
+        try:
+            stdin.write(json.dumps(payload))
+            stdin.channel.shutdown_write()
+        except Exception:
+            return False
+        # Wait for the command to finish (mosquitto_pub returns 0 on success)
+        return stdout.channel.recv_exit_status() == 0
+
+    async def mqtt_publish(self, topic: str, payload: dict) -> bool:
+        if not await self.ensure_connected():
+            return False
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._mqtt_publish_sync, topic, payload
+            )
+        except Exception as e:
+            log.warning("mosquitto_pub failed: %s", e)
+            return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Local session — runs on the controller, no SSH needed
+# ──────────────────────────────────────────────────────────────────────
+
+class LocalControllerSession:
+    """Connects directly to /var/run/arduino-router.sock for RPC.
+
+    Used when the HMI server runs on the controller itself (local_mode=true).
+    - RPC: direct Unix socket + msgpack (no SSH, no helper script)
+    - Status/sensor data: reads /tmp/hvac_status.json written by bridge_daemon
+    - Config data: reads the bridge daemon config file directly
+    - Commands: mosquitto_pub to localhost (cmd channel stays local)
+    """
+
+    STATUS_CACHE = Path("/tmp/hvac_status.json")
+    CONFIG_PATHS = [
+        Path.home() / ".config/hvac/config.json",
+        Path("/etc/hvac/config.json"),
+    ]
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.last_error: Optional[str] = None
+
+    async def ensure_connected(self) -> bool:
+        return True   # no persistent connection
+
+    def close(self):
+        pass
+
+    # ---- RPC via direct Unix socket ----
+
+    def _rpc_one_sync(self, method: str, args: list, timeout: float = 4.0):
+        """One msgpack-RPC call against the local arduino-router socket."""
+        sock_path = self.cfg.get("router_socket", "/var/run/arduino-router.sock")
+        req = msgpack.packb([0, 1, method, args], use_bin_type=True)
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(sock_path)
+            s.sendall(req)
+            data = b""
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except _socket.timeout:
+                    return None
+                if not chunk:
+                    break
+                data += chunk
+                try:
+                    return msgpack.unpackb(data, raw=False)
+                except Exception:
+                    if time.monotonic() > deadline:
+                        return None
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.debug("Local RPC %s failed: %s", method, exc)
+            return None
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def _rpc_batch_sync(self, methods: list, timeout: float = 4.0) -> dict:
+        result = {}
+        for name, args in methods:
+            result[name] = self._rpc_one_sync(name, args, timeout)
+        return result
+
+    async def rpc_batch(self, methods: list, timeout: float = 4.0) -> dict:
+        try:
+            resp = await asyncio.get_event_loop().run_in_executor(
+                None, self._rpc_batch_sync, methods, timeout
+            )
+            if any(v is not None for v in resp.values()):
+                self.last_error = None
+            return resp
+        except Exception as exc:
+            self.last_error = f"Local RPC failed: {exc}"
+            log.warning(self.last_error)
+            return {}
+
+    async def rpc(self, method: str, args=None, timeout: float = 4.0):
+        result = await self.rpc_batch([(method, args or [])], timeout)
+        return result.get(method)
+
+    # ---- Status / sensor data from bridge_daemon cache file ----
+
+    def _read_status_cache(self) -> Optional[dict]:
+        try:
+            return json.loads(self.STATUS_CACHE.read_text())
+        except Exception as exc:
+            log.debug("Status cache read failed: %s", exc)
+            return None
+
+    async def mqtt_status(self, timeout: float = 2.0) -> Optional[dict]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._read_status_cache
+        )
+
+    # ---- Config from bridge_daemon config file ----
+
+    def _read_config_file(self) -> Optional[dict]:
+        for path in self.CONFIG_PATHS:
+            try:
+                if path.exists():
+                    return json.loads(path.read_text())
+            except Exception as exc:
+                log.debug("Config read %s failed: %s", path, exc)
+        return None
+
+    async def mqtt_config(self, timeout: float = 2.0) -> Optional[dict]:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._read_config_file
+        )
+
+    # ---- Commands via local mosquitto_pub ----
+
+    def _mqtt_publish_sync(self, topic: str, payload: dict, timeout: float = 3.0) -> bool:
+        try:
+            result = subprocess.run(
+                ["mosquitto_pub", "-h", "localhost", "-t", topic, "-q", "1",
+                 "-m", json.dumps(payload)],
+                capture_output=True, timeout=timeout,
+            )
+            return result.returncode == 0
+        except Exception as exc:
+            log.warning("mosquitto_pub failed: %s", exc)
+            return False
+
+    async def mqtt_publish(self, topic: str, payload: dict) -> bool:
+        try:
+            return await asyncio.get_event_loop().run_in_executor(
+                None, self._mqtt_publish_sync, topic, payload
+            )
+        except Exception as exc:
+            log.warning("mqtt_publish failed: %s", exc)
+            return False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -401,6 +610,7 @@ async def collect_status(session: ControllerSession) -> dict:
         ("get_input_override", []),
     ]))
     mqtt_task = asyncio.create_task(session.mqtt_status(timeout=2.0))
+    cfg_task  = asyncio.create_task(session.mqtt_config(timeout=2.0))
 
     rpc_resp = await rpc_task
 
@@ -426,6 +636,35 @@ async def collect_status(session: ControllerSession) -> dict:
         snapshot["input_override"] = ovr
         snapshot["sim_active"] = any(v != "auto" for v in ovr.values())
 
+    # ── Derive mode + compressor_on from the LIVE RPC outputs ─────
+    # The bridge daemon also publishes these on MQTT, but that message
+    # only refreshes every ~10 s.  The HMI polls outputs every ~1 s, so
+    # if we waited for the MQTT derivation the dashboard would lag by
+    # up to 9 s after the user simulates an input.  Mirror bridge
+    # daemon's derive_mode() here so the UI stays snappy.
+    if out_val is not None:
+        outs = snapshot["outputs"]
+        hc, lc = bool(outs.get("high_cool")), bool(outs.get("low_cool"))
+        rv     = bool(outs.get("reversing_valve"))
+        dh     = bool(outs.get("dehumidifier_on"))
+        fn     = bool(outs.get("fan_on"))
+        if   (hc or lc) and rv: snapshot["mode"] = "heat"
+        elif hc:                snapshot["mode"] = "high_cool"
+        elif lc:                snapshot["mode"] = "low_cool"
+        elif dh:                snapshot["mode"] = "dehum"
+        elif fn:                snapshot["mode"] = "fan"
+        else:                   snapshot["mode"] = "off"
+        snapshot["compressor_on"] = hc or lc
+
+    # Current system config (retained MQTT topic from the bridge daemon)
+    cfg_msg = await cfg_task
+    if isinstance(cfg_msg, dict):
+        # Keep only the keys we expose to the UI, plus updated_at.
+        keep = {f[0] for f in CONFIG_FIELDS} | {"config_updated_at"}
+        snapshot["config"] = {k: v for k, v in cfg_msg.items() if k in keep}
+    else:
+        snapshot["config"] = None
+
     # Sensors + derived fields from MQTT retained status
     mqtt = await mqtt_task
     if isinstance(mqtt, dict):
@@ -440,9 +679,19 @@ async def collect_status(session: ControllerSession) -> dict:
             "ac_energy_kwh":         mqtt.get("ac_energy_kwh"),
             "dehum_power_w":         mqtt.get("dehum_power_w"),
         }
-        snapshot["mode"]          = mqtt.get("mode")
-        snapshot["compressor_on"] = mqtt.get("compressor_on")
+        # mode + compressor_on are now derived live from the RPC outputs
+        # above (snappier than the 10 s MQTT cycle).  Fall back to MQTT
+        # only if the live RPC failed and we have no fresh outputs.
+        if out_val is None:
+            snapshot["mode"]          = mqtt.get("mode")
+            snapshot["compressor_on"] = mqtt.get("compressor_on")
         snapshot["mqtt_ts"]       = mqtt.get("timestamp")
+        # MCU health: published by bridge_daemon every cycle.  We surface
+        # it on the dashboard so a hung MCU is obvious even if the HMI's
+        # own RPC reads happen to look fresh (they don't — but defense in
+        # depth — the bridge sees the same RPC channel and decides).
+        snapshot["mcu_healthy"]   = mqtt.get("mcu_healthy")
+        snapshot["mcu_silence_s"] = mqtt.get("mcu_silence_s")
 
     return snapshot
 
@@ -482,7 +731,9 @@ class Hub:
                 self.clients.discard(ws)
 
 
-SESSION = ControllerSession(CONFIG)
+SESSION: ControllerSession | LocalControllerSession = (
+    LocalControllerSession(CONFIG) if CONFIG.get("local_mode") else ControllerSession(CONFIG)
+)
 HUB = Hub()
 
 
@@ -514,6 +765,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="HVAC HMI", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+@app.middleware("http")
+async def no_cache_for_html_and_static(request, call_next):
+    """Avoid stale UI after server-side edits — the HMI is a small
+    single-user dev app, so we don't want any caching on / or /static/."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 
 @app.get("/")
 async def root():
@@ -531,8 +792,42 @@ async def api_metadata():
     return {
         "outputs": [{"key": k, "label": label, "desc": d} for k, label, d in OUTPUTS],
         "inputs":  [{"key": k, "label": label, "desc": d} for k, label, d in INPUTS],
+        "config_fields": [
+            {
+                "key": k, "label": label, "unit": unit, "kind": kind,
+                "min": mn, "max": mx, "choices": ch, "help": hlp,
+            }
+            for k, label, unit, kind, mn, mx, ch, hlp in CONFIG_FIELDS
+        ],
         "controller_host": CONFIG["controller_host"],
     }
+
+
+async def apply_set_config(cmd: dict) -> dict:
+    """Publish a setConfig command to the bridge daemon via MQTT.
+
+    Accepts {"type": "set_config", "key": "<schema_key>", "value": <val>}.
+    The bridge daemon validates against its SETCONFIG_SCHEMA, persists to
+    /etc/hvac/config.json, pushes the MCU-relevant subset via set_config,
+    and republishes home/hvac/config.  We re-poll afterwards so the UI
+    reflects the new value once the retained message refreshes.
+    """
+    key = cmd.get("key")
+    value = cmd.get("value")
+    valid_keys = {f[0] for f in CONFIG_FIELDS}
+    if key not in valid_keys:
+        return {"ok": False, "error": f"unknown config key {key!r}"}
+
+    payload = {"cmd": "setConfig", "key": key, "value": value}
+    ok = await SESSION.mqtt_publish(
+        SESSION.cfg.get("mqtt_cmd_topic", "home/hvac/cmd"), payload
+    )
+
+    # Give the bridge a moment to process + republish, then re-poll.
+    await asyncio.sleep(0.4)
+    snap = await collect_status(SESSION)
+    await HUB.broadcast(snap)
+    return {"ok": ok, "key": key, "value": value}
 
 
 async def apply_override_command(cmd: dict) -> dict:
@@ -584,12 +879,15 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             if cmd.get("type") in ("override", "clear_overrides"):
                 result = await apply_override_command(cmd)
-                try:
-                    await ws.send_json({"type": "ack", **result})
-                except Exception:
-                    pass
+            elif cmd.get("type") == "set_config":
+                result = await apply_set_config(cmd)
             else:
                 log.debug("ws msg (ignored): %s", msg)
+                continue
+            try:
+                await ws.send_json({"type": "ack", **result})
+            except Exception:
+                pass
     except WebSocketDisconnect:
         pass
     finally:
@@ -602,11 +900,20 @@ async def api_override(cmd: dict):
     return await apply_override_command(cmd)
 
 
+@app.post("/api/set_config")
+async def api_set_config(cmd: dict):
+    """REST fallback for changing a system setting."""
+    return await apply_set_config(cmd)
+
+
 if __name__ == "__main__":
     import uvicorn
+    # Bind to all interfaces so any device on the LAN can reach the HMI.
+    # In local mode this makes http://192.168.1.197:8000 accessible from
+    # any browser on the network.
     uvicorn.run(
         "server:app",
-        host="127.0.0.1",
+        host="0.0.0.0",
         port=8000,
         reload=False,
         log_level="info",

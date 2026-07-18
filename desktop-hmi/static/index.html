@@ -31,21 +31,22 @@
       <div class="hero-value" id="mode">—</div>
     </div>
     <div class="hero-card">
-      <div class="hero-label">Compressor</div>
+      <div class="hero-label">Heat Pump</div>
       <div class="hero-value" id="compressor">—</div>
+      <div class="hero-sub" id="compressor-sub">compressor stage</div>
     </div>
     <div class="hero-card sensor-card" id="card-indoor">
       <div class="hero-label">Indoor <span class="stale-tag" id="stale-indoor">STALE</span></div>
-      <div class="hero-value">
-        <span id="indoor-temp">—</span><span class="unit">°F</span>
-        <span class="hero-sub" id="indoor-hum">— %RH</span>
+      <div class="hero-dual">
+        <div class="hero-value"><span id="indoor-temp">—</span><span class="unit">°F</span></div>
+        <div class="hero-value"><span id="indoor-hum">—</span><span class="unit">%RH</span></div>
       </div>
     </div>
     <div class="hero-card sensor-card" id="card-outdoor">
       <div class="hero-label">Outdoor <span class="stale-tag" id="stale-outdoor">STALE</span></div>
-      <div class="hero-value">
-        <span id="outdoor-temp">—</span><span class="unit">°F</span>
-        <span class="hero-sub" id="outdoor-hum">— %RH</span>
+      <div class="hero-dual">
+        <div class="hero-value"><span id="outdoor-temp">—</span><span class="unit">°F</span></div>
+        <div class="hero-value"><span id="outdoor-hum">—</span><span class="unit">%RH</span></div>
       </div>
     </div>
     <div class="hero-card power sensor-card" id="card-power">
@@ -74,6 +75,14 @@
       <div class="grid" id="outputs-grid"></div>
     </section>
   </main>
+
+  <section class="panel settings-panel" id="settings-panel">
+    <h2 class="panel-title">
+      <span>System Settings</span>
+      <span class="panel-sub" id="settings-sub">stored on the controller; changes take effect immediately</span>
+    </h2>
+    <div id="settings-grid"></div>
+  </section>
 
   <footer class="footer">
     <span id="last-update">Waiting for first poll…</span>

@@ -22,6 +22,8 @@ Run as a systemd service: see linux/hvac-bridge.service
 
 import json
 import logging
+import os
+import socket
 import struct
 import threading
 import time
@@ -53,7 +55,21 @@ except ImportError:
 # CONSTANTS
 # ──────────────────────────────────────────────────────────────
 
-CONFIG_PATH    = Path("/etc/hvac/config.json")
+# Resolution order:
+#   1. HVAC_CONFIG_PATH env var (override for tests / unusual installs)
+#   2. ~/.config/hvac/config.json  — writable by the service user (arduino)
+#   3. /etc/hvac/config.json       — read-only fallback (legacy path)
+#
+# Previously this was hard-coded to /etc/hvac/config.json, but the service
+# now runs as the `arduino` user (not root), so writes there fail with
+# EACCES and setConfig changes don't persist across reboots.  Falling back
+# to the legacy /etc/hvac path on read keeps existing installs working.
+_xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+_legacy = Path("/etc/hvac/config.json")
+_user_default = Path(_xdg) / "hvac" / "config.json"
+CONFIG_PATH = Path(os.environ.get("HVAC_CONFIG_PATH") or (
+    _legacy if _legacy.exists() and not _user_default.exists() else _user_default
+))
 RS485_PORT     = "/dev/ttyUSB0"   # Waveshare USB-RS485 adapter
 RS485_BAUD     = 9600
 RS485_TIMEOUT  = 1.0              # seconds per Modbus request
@@ -112,28 +128,44 @@ MCU_INPUT_FIELDS = [
 # ──────────────────────────────────────────────────────────────
 
 DEFAULT_CONFIG: dict = {
-    "mqtt_host":              "localhost",   # UPDATE to your broker IP
-    "mqtt_port":              1883,
-    "mqtt_username":          None,          # None = no auth
-    "mqtt_password":          None,
-    "theater_enabled":        False,
-    "vent_minutes_per_hour":  10,
-    "mode_override":          "auto",        # "auto" | "off"
-    "heat_pump_min_temp_f":   40,            # aux heat engages below this °F
-    "free_cool_max_temp_f":   60,            # free-cooling vent opens below this °F
-    "high_humidity_pct":      80,            # vent forced off at or above this %RH
-    "dehum_max_minutes":      20,            # dehumidifier timeout before forced high_cool
+    "mqtt_host":                "localhost",   # UPDATE to your broker IP
+    "mqtt_port":                1883,
+    "mqtt_username":            None,          # None = no auth
+    "mqtt_password":            None,
+    "theater_enabled":          False,
+    "downstairs_enabled":       True,
+    "vent_minutes_per_hour":    10,
+    "mode_override":            "auto",        # "auto" | "off"
+    "heat_pump_min_temp_f":     40,            # aux heat engages below this °F
+    "free_cool_max_temp_f":     60,            # free-cooling vent opens below this °F
+    "high_humidity_pct":        80,            # OUTDOOR humidity — vent forced off at or above this %RH
+    "indoor_humidity_low_pct":  55,            # INDOOR humidity — dehumidifier-only is sufficient below this %RH
+    "indoor_humidity_high_pct": 65,            # INDOOR humidity — force high_cool emergency dehum at or above this %RH
+    "dehum_max_minutes":        20,            # dehumidifier timeout before forced high_cool
+    "mcu_hang_threshold_s":     60,            # seconds of MCU silence before publishing mcu_healthy=False
+    "mcu_auto_recover":         False,         # if True (and sudoers allows), restart arduino-router after threshold
+    # Cloud MQTT — dual-publish to a remote broker for Snowflake ingestion.
+    # Uses the public HiveMQ broker (no auth) by default.
+    "cloud_mqtt_enabled": True,
+    "cloud_mqtt_host":    "broker.hivemq.com",
+    "cloud_mqtt_port":    1883,
+    "cloud_mqtt_topic":   "jchriswaters_merrick_ac",
 }
 
 # Allowed keys, (min, max, type) — None = no range check
 SETCONFIG_SCHEMA: dict = {
-    "heat_pump_min_temp_f":  (20,   60, int),
-    "free_cool_max_temp_f":  (40,   80, int),
-    "high_humidity_pct":     (50,  100, int),
-    "dehum_max_minutes":     ( 5,  120, int),
-    "vent_minutes_per_hour": ( 0,   60, int),
-    "theater_enabled":       (None, None, bool),
-    "mode_override":         (None, None, str),
+    "heat_pump_min_temp_f":     (20,   60, int),
+    "free_cool_max_temp_f":     (40,   80, int),
+    "high_humidity_pct":        (50,  100, int),
+    "indoor_humidity_low_pct":  (30,   70, int),
+    "indoor_humidity_high_pct": (40,   90, int),
+    "dehum_max_minutes":        ( 5,  120, int),
+    "vent_minutes_per_hour":    ( 0,   60, int),
+    "theater_enabled":          (None, None, bool),
+    "downstairs_enabled":       (None, None, bool),
+    "mode_override":            (None, None, str),
+    "mcu_hang_threshold_s":     (10,  600, int),
+    "mcu_auto_recover":         (None, None, bool),
 }
 
 log = logging.getLogger("hvac")
@@ -355,10 +387,11 @@ def _compute_temp_rising_fast(current_temp_f: float) -> bool:
 
 
 def compute_sensor_flags(
-    outdoor_temp_f:      Optional[float],
+    outdoor_temp_f:       Optional[float],
     outdoor_humidity_pct: Optional[float],
-    indoor_temp_f:       Optional[float],
-    cfg:                 dict,
+    indoor_temp_f:        Optional[float],
+    indoor_humidity_pct:  Optional[float],
+    cfg:                  dict,
 ) -> dict:
     """
     Evaluate environmental thresholds and return a dict of SensorFlag booleans
@@ -366,9 +399,11 @@ def compute_sensor_flags(
 
     Returns cautious defaults if sensor readings are unavailable.
     """
-    heat_min  = cfg["heat_pump_min_temp_f"]
-    cool_max  = cfg["free_cool_max_temp_f"]
-    hum_limit = cfg["high_humidity_pct"]
+    heat_min      = cfg["heat_pump_min_temp_f"]
+    cool_max      = cfg["free_cool_max_temp_f"]
+    hum_limit     = cfg["high_humidity_pct"]
+    in_hum_low    = cfg["indoor_humidity_low_pct"]
+    in_hum_high   = cfg["indoor_humidity_high_pct"]
 
     # Default to safe values when sensor data is absent
     if outdoor_temp_f is not None:
@@ -396,12 +431,27 @@ def compute_sensor_flags(
         log.warning("Indoor temp unavailable — defaulting tempRisingFast=True")
         temp_rising_fast = True   # safe default: stay on low stage
 
+    # Indoor humidity drives two thresholds:
+    #   • humidityModerate — RH >= low threshold (dehumidifier may not keep up)
+    #   • humidityHigh     — RH >= high threshold (emergency: force high_cool)
+    # If the reading is missing, default both to FALSE so we don't trigger
+    # emergency cooling on a sensor outage.
+    if indoor_humidity_pct is not None:
+        humidity_moderate = indoor_humidity_pct >= in_hum_low
+        humidity_high     = indoor_humidity_pct >= in_hum_high
+    else:
+        log.warning("Indoor humidity unavailable — defaulting humidityModerate/High=False")
+        humidity_moderate = False
+        humidity_high     = False
+
     return {
-        "heatPumpOk":    heat_pump_ok,
-        "auxHeatNeeded": aux_heat_needed,
-        "tempRisingFast": temp_rising_fast,
-        "ventOk":        vent_temp_ok and vent_hum_ok,
-        "ventBlocked":   vent_blocked,
+        "heatPumpOk":        heat_pump_ok,
+        "auxHeatNeeded":     aux_heat_needed,
+        "tempRisingFast":    temp_rising_fast,
+        "ventOk":            vent_temp_ok and vent_hum_ok,
+        "ventBlocked":       vent_blocked,
+        "humidityModerate":  humidity_moderate,
+        "humidityHigh":      humidity_high,
     }
 
 # ──────────────────────────────────────────────────────────────
@@ -446,14 +496,95 @@ def push_sensor_flags_to_mcu(flags: dict) -> None:
         return
     try:
         _MCUBridge.call("set_flags",
-            bool(flags.get("heatPumpOk",    True)),
-            bool(flags.get("auxHeatNeeded", False)),
-            bool(flags.get("tempRisingFast", True)),
-            bool(flags.get("ventOk",        False)),
-            bool(flags.get("ventBlocked",   False)),
+            bool(flags.get("heatPumpOk",       True)),
+            bool(flags.get("auxHeatNeeded",    False)),
+            bool(flags.get("tempRisingFast",   True)),
+            bool(flags.get("ventOk",           False)),
+            bool(flags.get("ventBlocked",      False)),
+            bool(flags.get("humidityModerate", False)),
+            bool(flags.get("humidityHigh",     False)),
         )
     except Exception as exc:
         log.warning("MCU Bridge set_flags failed: %s", exc)
+
+
+# ──────────────────────────────────────────────────────────────
+# WATCHDOG / HEALTH MONITORING
+# ──────────────────────────────────────────────────────────────
+
+def _sd_notify(message: str) -> bool:
+    """
+    Send a notification message to systemd (sd_notify protocol).
+
+    Used for two things:
+      • READY=1 once we've finished startup (required by Type=notify)
+      • WATCHDOG=1 each polling cycle, so systemd kills+restarts us if
+        the main loop hangs (configured via WatchdogSec= in the unit)
+
+    Returns True if the message was sent, False if NOTIFY_SOCKET wasn't
+    set (running outside systemd — fine, just a no-op).
+    """
+    sock_path = os.environ.get("NOTIFY_SOCKET")
+    if not sock_path:
+        return False
+    # Abstract socket starts with '@' on the env var, '\0' on the wire
+    if sock_path.startswith("@"):
+        sock_path = "\0" + sock_path[1:]
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            sock.connect(sock_path)
+            sock.sendall(message.encode())
+        finally:
+            sock.close()
+        return True
+    except Exception as exc:
+        log.debug("sd_notify(%r) failed: %s", message, exc)
+        return False
+
+
+# MCU health state.  We track the timestamp of the last successful
+# MCU RPC read; bridge_daemon publishes a derived `mcu_healthy` field
+# in the status payload so the HMI can show it, and (optionally) tries
+# to recover by restarting arduino-router when the hang threshold is hit.
+_mcu_last_ok_ts: float = 0.0
+_mcu_last_recover_ts: float = 0.0
+_mcu_recover_cooldown_s: float = 120.0   # don't attempt more than once per 2 min
+
+
+def _try_recover_mcu() -> None:
+    """
+    Best-effort MCU recovery: restart arduino-router via systemd.
+    The router unit's ExecStartPre cycles SRST (GPIO 38) which resets
+    the MCU; the after-ready hook then releases it once the router is
+    listening on /dev/ttyHS1 again.
+
+    Requires sudoers to allow:
+        arduino ALL=(root) NOPASSWD: /bin/systemctl restart arduino-router.service
+    If sudoers isn't configured, the call fails silently and only the
+    detection / reporting half of the watchdog runs.
+    """
+    global _mcu_last_recover_ts
+    now = time.monotonic()
+    if now - _mcu_last_recover_ts < _mcu_recover_cooldown_s:
+        return
+    _mcu_last_recover_ts = now
+    log.error("MCU unresponsive — attempting recovery via "
+              "`sudo -n systemctl restart arduino-router.service`")
+    try:
+        import subprocess
+        rc = subprocess.run(
+            ["sudo", "-n", "systemctl", "restart", "arduino-router.service"],
+            capture_output=True, timeout=15,
+        )
+        if rc.returncode == 0:
+            log.warning("MCU recovery: arduino-router restarted OK")
+        else:
+            log.error("MCU recovery failed (rc=%d, stderr=%r). "
+                      "Check sudoers — see docs/PROJECT-STATUS.md.",
+                      rc.returncode, rc.stderr.decode(errors="replace")[:200])
+    except Exception as exc:
+        log.error("MCU recovery subprocess raised: %s", exc)
 
 
 def push_config_to_mcu(cfg: dict) -> None:
@@ -469,6 +600,7 @@ def push_config_to_mcu(cfg: dict) -> None:
             int(cfg.get("vent_minutes_per_hour",  10)),
             cfg.get("mode_override", "auto") == "off",
             int(cfg.get("dehum_max_minutes",       20)),
+            bool(cfg.get("downstairs_enabled",    True)),
         )
     except Exception as exc:
         log.warning("MCU Bridge set_config failed: %s", exc)
@@ -499,14 +631,19 @@ def derive_mode(s: dict) -> str:
 def build_config_payload(cfg: dict) -> dict:
     """Build the home/hvac/config MQTT payload from the current config dict."""
     return {
-        "theater_enabled":        cfg.get("theater_enabled", False),
-        "vent_minutes_per_hour":  cfg.get("vent_minutes_per_hour", 10),
-        "mode_override":          cfg.get("mode_override", "auto"),
-        "heat_pump_min_temp_f":   cfg.get("heat_pump_min_temp_f", 40),
-        "free_cool_max_temp_f":   cfg.get("free_cool_max_temp_f", 60),
-        "high_humidity_pct":      cfg.get("high_humidity_pct", 80),
-        "dehum_max_minutes":      cfg.get("dehum_max_minutes", 20),
-        "config_updated_at":      int(time.time()),
+        "theater_enabled":          cfg.get("theater_enabled", False),
+        "downstairs_enabled":       cfg.get("downstairs_enabled", True),
+        "vent_minutes_per_hour":    cfg.get("vent_minutes_per_hour", 10),
+        "mode_override":            cfg.get("mode_override", "auto"),
+        "heat_pump_min_temp_f":     cfg.get("heat_pump_min_temp_f", 40),
+        "free_cool_max_temp_f":     cfg.get("free_cool_max_temp_f", 60),
+        "high_humidity_pct":        cfg.get("high_humidity_pct", 80),
+        "indoor_humidity_low_pct":  cfg.get("indoor_humidity_low_pct", 55),
+        "indoor_humidity_high_pct": cfg.get("indoor_humidity_high_pct", 65),
+        "dehum_max_minutes":        cfg.get("dehum_max_minutes", 20),
+        "mcu_hang_threshold_s":     cfg.get("mcu_hang_threshold_s", 60),
+        "mcu_auto_recover":         cfg.get("mcu_auto_recover", False),
+        "config_updated_at":        int(time.time()),
     }
 
 # ──────────────────────────────────────────────────────────────
@@ -623,9 +760,14 @@ def run() -> None:
         log.warning("arduino.app_utils not available — MCU Bridge disabled")
 
     # ── RS485 Modbus client ────────────────────────────────────
-    modbus: Optional[ModbusSerialClient] = None
-    if ModbusSerialClient is not None:
-        modbus = ModbusSerialClient(
+    # _modbus_connect() is also called each polling cycle when modbus is
+    # None, so a missing ttyUSB0 at startup (hub not yet enumerated) or a
+    # temporary disconnect is recovered automatically without restarting
+    # the service.
+    def _modbus_connect() -> Optional["ModbusSerialClient"]:
+        if ModbusSerialClient is None:
+            return None
+        client = ModbusSerialClient(
             port=RS485_PORT,
             baudrate=RS485_BAUD,
             stopbits=1,
@@ -633,11 +775,17 @@ def run() -> None:
             parity="N",
             timeout=RS485_TIMEOUT,
         )
-        if modbus.connect():
+        if client.connect():
             log.info("RS485 Modbus connected on %s @ %d baud", RS485_PORT, RS485_BAUD)
+            return client
         else:
-            log.error("RS485 Modbus failed to connect on %s", RS485_PORT)
-            modbus = None
+            log.error("RS485 Modbus failed to connect on %s — will retry next cycle",
+                      RS485_PORT)
+            return None
+
+    modbus: Optional[ModbusSerialClient] = None
+    if ModbusSerialClient is not None:
+        modbus = _modbus_connect()
     else:
         log.warning("pymodbus not available — RS485 sensor reads disabled")
 
@@ -681,14 +829,67 @@ def run() -> None:
 
     mqtt_client.loop_start()   # handles reconnection automatically in a background thread
 
+    # ── Cloud MQTT client (dual-publish for Snowflake pipeline) ───
+    # Publishes the same status payload to a cloud broker so the
+    # mqtt-to-snowflake service on GCP can pick it up.
+    # Uses the public HiveMQ broker — no auth, fire-and-forget QoS 0.
+    cloud_client: Optional[mqtt.Client] = None
+    if cfg.get("cloud_mqtt_enabled", True):
+        cloud_host  = cfg.get("cloud_mqtt_host",  "broker.hivemq.com")
+        cloud_port  = int(cfg.get("cloud_mqtt_port", 1883))
+
+        cloud_client = mqtt.Client(
+            client_id=f"merrick-ac-{int(time.time())}",
+            clean_session=True,
+        )
+        cloud_client.reconnect_delay_set(min_delay=10, max_delay=120)
+
+        def on_cloud_connect(client, userdata, flags, rc):
+            if rc == 0:
+                log.info("Cloud MQTT connected to %s:%d", cloud_host, cloud_port)
+            else:
+                log.warning("Cloud MQTT connect failed (rc=%d) — will retry", rc)
+
+        def on_cloud_disconnect(client, userdata, rc):
+            if rc != 0:
+                log.warning("Cloud MQTT disconnected (rc=%d) — will reconnect", rc)
+
+        cloud_client.on_connect    = on_cloud_connect
+        cloud_client.on_disconnect = on_cloud_disconnect
+
+        # Resolve hostname to IPv4 explicitly — paho may otherwise pick up an
+        # IPv6 address from DNS and hang if IPv6 routing to the broker is broken.
+        import socket as _socket
+        try:
+            _ai = _socket.getaddrinfo(cloud_host, cloud_port, _socket.AF_INET)
+            cloud_connect_host = _ai[0][4][0]
+            log.info("Cloud MQTT broker resolved to IPv4 %s", cloud_connect_host)
+        except Exception:
+            cloud_connect_host = cloud_host   # fall back to hostname
+
+        cloud_client.loop_start()   # start loop thread before connect so reconnects work
+        try:
+            cloud_client.connect(cloud_connect_host, cloud_port, keepalive=60)
+        except Exception as exc:
+            log.warning("Cloud MQTT initial connect failed: %s — will retry in background", exc)
+
     # Push initial config to MCU before entering the polling loop
     with cfg_lock:
         push_config_to_mcu(cfg)
 
     log.info("Entering polling loop (interval=%d s)", POLL_INTERVAL_S)
+    # Tell systemd we're ready (no-op outside systemd).  This is required
+    # by Type=notify, so the unit stays "active" instead of "activating".
+    _sd_notify("READY=1")
+    global _mcu_last_ok_ts
+    _mcu_last_ok_ts = time.monotonic()   # assume healthy at startup
 
     while True:
         loop_start = time.monotonic()
+        # Pet the systemd watchdog every iteration.  WatchdogSec= in the
+        # unit governs the timeout; if we ever block here for too long
+        # (deadlock, RS485 lockup, etc.) systemd kills+restarts us.
+        _sd_notify("WATCHDOG=1")
 
         # ── Snapshot config under lock ─────────────────────────
         with cfg_lock:
@@ -714,11 +915,31 @@ def run() -> None:
         mcu_state = read_mcu_state()
         if mcu_state:
             payload.update(mcu_state)
+            _mcu_last_ok_ts = time.monotonic()
         elif _bridge_available:
             log.warning("MCU Bridge read returned no data")
 
+        # MCU health: how long since the last successful MCU RPC read.
+        mcu_silence_s = time.monotonic() - _mcu_last_ok_ts
+        hang_threshold = float(cfg_snap.get("mcu_hang_threshold_s", 60))
+        mcu_healthy   = mcu_silence_s < hang_threshold
+        payload["mcu_healthy"]      = mcu_healthy
+        payload["mcu_silence_s"]    = round(mcu_silence_s, 1)
+        if not mcu_healthy:
+            log.error("MCU unresponsive for %.0f s (threshold %.0f s)",
+                      mcu_silence_s, hang_threshold)
+            if cfg_snap.get("mcu_auto_recover", False):
+                _try_recover_mcu()
+
         # ── Read RS485 sensors ─────────────────────────────────
+        # If the port was missing at startup or was lost mid-run (e.g. hub
+        # power-cycled), try to reconnect before the reads.  One attempt per
+        # cycle; on success the client is reused for all subsequent cycles.
+        if modbus is None:
+            modbus = _modbus_connect()
+
         indoor_temp_f       = None
+        indoor_humidity     = None
         outdoor_temp_f      = None
         outdoor_humidity    = None
 
@@ -726,7 +947,8 @@ def run() -> None:
             indoor = read_sht30(modbus, ADDR_SHT30_INDOOR, "indoor")
             if indoor:
                 payload.update(indoor)
-                indoor_temp_f = indoor.get("indoor_temp_f")
+                indoor_temp_f   = indoor.get("indoor_temp_f")
+                indoor_humidity = indoor.get("indoor_humidity_pct")
 
             outdoor = read_sht30(modbus, ADDR_SHT30_OUTDOOR, "outdoor")
             if outdoor:
@@ -742,18 +964,37 @@ def run() -> None:
             if dehum_power:
                 payload.update(dehum_power)
 
+            # If both SHT30s failed, the port may have gone away mid-run
+            # (e.g. hub unplugged).  Close the client so the next cycle
+            # triggers a fresh reconnect attempt via _modbus_connect().
+            if indoor is None and outdoor is None:
+                try:
+                    modbus.close()
+                except Exception:
+                    pass
+                modbus = None
+                log.warning("Both SHT30 reads failed — closing Modbus client; "
+                            "will attempt reconnect next cycle")
+
         # ── Compute and push SensorFlags to MCU ───────────────
         flags = compute_sensor_flags(
             outdoor_temp_f=outdoor_temp_f,
             outdoor_humidity_pct=outdoor_humidity,
             indoor_temp_f=indoor_temp_f,
+            indoor_humidity_pct=indoor_humidity,
             cfg=cfg_snap,
         )
         push_sensor_flags_to_mcu(flags)
 
         # ── Derive compound fields ─────────────────────────────
+        # compressor_on = heat-pump compressor is currently energized.
+        # Derived from the MCU's relay state so it remains accurate even
+        # while the SDM120 AC current meter isn't wired/reporting.  Both
+        # cooling (low_cool / high_cool) and heating (low_cool / high_cool
+        # with reversing_valve) run the same compressor; high_heat is
+        # auxiliary electric resistance, not the compressor.
         payload["mode"]         = derive_mode(payload)
-        payload["compressor_on"] = payload.get("ac_current_a", 0.0) > 5.0
+        payload["compressor_on"] = bool(payload.get("low_cool")) or bool(payload.get("high_cool"))
         payload["timestamp"]    = int(time.time())
 
         # ── Write status cache for web_config.py ───────────────
@@ -765,16 +1006,22 @@ def run() -> None:
         except Exception as exc:
             log.debug("Status cache write failed: %s", exc)
 
-        # ── Publish MQTT status (retained) ─────────────────────
-        try:
-            mqtt_client.publish(MQTT_STATUS, json.dumps(payload), retain=True, qos=0)
-            log.info("Status → mode=%-10s  indoor=%-5s°F  outdoor=%-5s°F  hum=%-4s%%",
-                     payload["mode"],
-                     f"{indoor_temp_f:.1f}"  if indoor_temp_f   is not None else "?",
-                     f"{outdoor_temp_f:.1f}" if outdoor_temp_f  is not None else "?",
-                     f"{outdoor_humidity:.0f}" if outdoor_humidity is not None else "?")
-        except Exception as exc:
-            log.error("MQTT publish failed: %s", exc)
+        # ── Publish MQTT status ────────────────────────────────────
+        # Status goes to the cloud broker (HiveMQ) for Snowflake ingestion.
+        # Local mosquitto is kept running but carries only the cmd/config
+        # channels — status is no longer published locally.
+        payload_json = json.dumps(payload)
+        log.info("Status → mode=%-10s  indoor=%-5s°F  outdoor=%-5s°F  hum=%-4s%%",
+                 payload["mode"],
+                 f"{indoor_temp_f:.1f}"  if indoor_temp_f   is not None else "?",
+                 f"{outdoor_temp_f:.1f}" if outdoor_temp_f  is not None else "?",
+                 f"{outdoor_humidity:.0f}" if outdoor_humidity is not None else "?")
+        if cloud_client:
+            cloud_topic = cfg_snap.get("cloud_mqtt_topic", "jchriswaters_merrick_ac")
+            try:
+                cloud_client.publish(cloud_topic, payload_json, qos=0, retain=False)
+            except Exception as exc:
+                log.warning("Cloud MQTT publish failed: %s", exc)
 
         # ── Sleep for the remainder of the poll interval ───────
         elapsed = time.monotonic() - loop_start

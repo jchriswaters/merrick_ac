@@ -65,13 +65,16 @@ const uint8_t PIN_FAN               = 19;  // Unico G wire — fan-only / dehumi
 // ─────────────────────────────────────────────────────────────
 
 struct Config {
-  bool    theaterEnabled   = false;  // theater zone damper logic active
-  uint8_t ventMinPerHour   = 10;     // fresh-air vent open minutes per hour (0–60)
-  bool    modeOverride     = false;  // true = force system off
-  int8_t  heatPumpMinTempF = 40;     // outdoor °F below which aux electric heat engages
-  int8_t  freeCoolMaxTempF = 60;     // outdoor °F below which free-cooling vent opens
-  uint8_t highHumidityPct  = 80;     // outdoor %RH at or above which vent is forced off
-  uint8_t dehumMaxMinutes  = 20;     // dehumidifier-only runtime before forced high_cool
+  bool    theaterEnabled    = false; // theater zone damper logic active
+  bool    downstairsEnabled = true;  // downstairs zone damper logic active
+                                     //   (false → damper held open unconditionally,
+                                     //    e.g. installs without a real downstairs zone)
+  uint8_t ventMinPerHour    = 10;    // fresh-air vent open minutes per hour (0–60)
+  bool    modeOverride      = false; // true = force system off
+  int8_t  heatPumpMinTempF  = 40;    // outdoor °F below which aux electric heat engages
+  int8_t  freeCoolMaxTempF  = 60;    // outdoor °F below which free-cooling vent opens
+  uint8_t highHumidityPct   = 80;    // outdoor %RH at or above which vent is forced off
+  uint8_t dehumMaxMinutes   = 20;    // dehumidifier-only runtime before forced high_cool
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -83,12 +86,14 @@ struct Config {
 // ─────────────────────────────────────────────────────────────
 
 struct SensorFlags {
-  bool heatPumpOk     = true;   // outdoor >= heatPumpMinTempF  → heat pump alone is fine
-  bool auxHeatNeeded  = false;  // outdoor < heatPumpMinTempF   → also run aux electric
-  bool tempRisingFast = true;   // indoor rising >= 1°F / 15 min → heat pump keeping up
-                                //   default TRUE = start low stage; escalate if Linux says not keeping up
-  bool ventOk         = false;  // outdoor < freeCoolMaxTempF AND hum < threshold → open vent
-  bool ventBlocked    = false;  // outdoor humidity >= highHumidityPct → vent must stay off
+  bool heatPumpOk        = true;   // outdoor >= heatPumpMinTempF  → heat pump alone is fine
+  bool auxHeatNeeded     = false;  // outdoor < heatPumpMinTempF   → also run aux electric
+  bool tempRisingFast    = true;   // indoor rising >= 1°F / 15 min → heat pump keeping up
+                                   //   default TRUE = start low stage; escalate if Linux says not keeping up
+  bool ventOk            = false;  // outdoor < freeCoolMaxTempF AND hum < threshold → open vent
+  bool ventBlocked       = false;  // outdoor humidity >= highHumidityPct → vent must stay off
+  bool humidityModerate  = false;  // indoor RH >= indoorHumidityLowPct  → dehumidifier-only no longer "safe enough"
+  bool humidityHigh      = false;  // indoor RH >= indoorHumidityHighPct → emergency: force high_cool, kill dehumidifier
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -136,11 +141,23 @@ Inputs      inp;
 Outputs     out;
 SensorFlags sf;
 
-// Compressor short-cycle / mode-change interlock (3 minutes)
-// Timer starts when compressor turns OFF. Prevents turning back ON,
-// or reversing heat↔cool, until INTERLOCK_MS has elapsed.
+// Compressor mode-reversal interlock (3 minutes).
+//
+// Timer starts whenever the compressor stops.  Within INTERLOCK_MS of
+// that, restarting the compressor in the OPPOSITE direction (heat<->cool)
+// is blocked — the mechanical reversal protection.  Restarting in the
+// SAME direction is allowed immediately (no short-cycle penalty when the
+// system is just satisfying the same kind of call again), and live stage
+// changes within a direction (low_cool <-> high_cool) never trigger the
+// timer at all because they don't stop the compressor.
 const unsigned long INTERLOCK_MS = 180000UL;
 unsigned long lastCompressorOffMs = 0;
+
+enum CompMode : uint8_t { CM_NONE = 0, CM_COOL = 1, CM_HEAT = 2 };
+// The direction the heat-pump compressor was in last time it ran.
+// Used to decide whether a fresh start is in the SAME direction (allowed
+// immediately) or the OPPOSITE direction (subject to INTERLOCK_MS).
+CompMode lastCompressorMode = CM_NONE;
 
 // Dehumidifier runtime timer (rules 7–8 in control-logic.md)
 // Dehumidifier runs alone (no compressor) while humidity is high.
@@ -300,32 +317,49 @@ void runZoneLogic() {
       desired.highHeat = true;
     }
 
-  } else if (mainCoolCall) {
-    // ── Rules 5–6: Cooling ────────────────────────────────────
-    desired.revValve = false;  // B-type: de-energise for cooling
+  } else if (mainCoolCall || sf.humidityHigh) {
+    // ── Cooling (main thermostat OR emergency dehumidification) ──
+    //
+    // Rule 3 (humidityHigh): if indoor humidity is above the second-level
+    // threshold, force high_cool regardless of the humidistat input.
+    // This routes through the same cooling branch as a thermostat cool
+    // call (so the mutual-exclusion-with-dehumidifier logic + interlocks
+    // all still apply).
+    desired.revValve = false;
     desired.fanOn    = true;
 
-    if (inp.highHumidity) {
-      // Rule 6: Mitsubishi variable-speed needs high stage for moisture removal
+    // Stage selection priority:
+    //   • humidityHigh      — rule 3, emergency dehumidification → high
+    //   • Y2 (mainHighCool) — rule 1 / standard 2-stage thermostat → high
+    //   • highHumidity      — rule 6, humidistat moisture removal → high
+    //   • otherwise         — rule 5, low stage on Y1 alone
+    if (sf.humidityHigh || inp.mainHighCool || inp.highHumidity) {
       desired.highCool = true;
     } else {
-      // Rule 5: normal cooling — low stage
       desired.lowCool = true;
     }
 
   } else {
-    // ── No main thermostat call ───────────────────────────────
+    // ── No main cool / heat call, indoor humidity not yet "high" ──
 
     if (inp.highHumidity) {
-      // Rules 7–8: Dehumidification without a cooling call
+      // Rules 2 / 7 / 8: humidistat is asking for dehumidification.
       if (dehumTimedOut) {
-        // Rule 8: dehumidifier has been running too long → switch to high_cool
-        // until humidity clears. Compressor subject to interlock (handled below).
+        // Rule 8 safety: dehumidifier has been running too long without
+        // clearing the humidistat — escalate to high_cool until it does.
         desired.highCool = true;
         desired.fanOn    = true;
+      } else if (sf.humidityModerate) {
+        // Indoor humidity is in the "moderate" band (>= low threshold,
+        // < high threshold).  The dehumidifier may not be keeping up but
+        // we haven't tripped the emergency threshold yet — keep running
+        // the dehumidifier and let the timeout safety catch a real failure.
+        desired.dehumOn = true;
+        desired.fanOn   = true;
       } else {
-        // Rule 7: run dehumidifier + fan; no compressor
-        // (dehumidifier exhaust feeds into air handler before condenser coil)
+        // Rule 2: humidistat is on but indoor humidity is below the
+        // first-level threshold (dehumidifier alone is comfortably
+        // handling moisture).  Run dehumidifier + fan only — no compressor.
         desired.dehumOn = true;
         desired.fanOn   = true;
       }
@@ -359,42 +393,49 @@ void runZoneLogic() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // COMPRESSOR INTERLOCK (anti-short-cycle + mode-change delay)
+  // COMPRESSOR INTERLOCK (mode-reversal protection only)
   //
-  // lastCompressorOffMs is set whenever the compressor turns OFF.
-  // While the interlock is active:
-  //   • Turning the compressor ON is blocked (from any OFF state)
-  //   • Reversing the valve while compressor is on is blocked
-  // Turning the compressor OFF is always allowed immediately.
-  // Stage changes within the same mode (low↔high within cooling)
-  // are allowed without triggering the interlock.
+  // Restarting the compressor in the SAME direction (cool→cool or
+  // heat→heat) is allowed immediately — the silent-then-on-again case
+  // doesn't risk the compressor mechanically.
+  // Restarting in the OPPOSITE direction within INTERLOCK_MS of the
+  // last stop is blocked, to give the reversing valve and refrigerant
+  // pressures time to equalize.
+  // Live stage changes (low↔high) within a single direction never stop
+  // the compressor, so they're not subject to the timer at all.
   // ─────────────────────────────────────────────────────────
 
   bool wasCompOn   = out.highCool  || out.lowCool;   // heat pump compressor was running
   bool wantsCompOn = desired.highCool || desired.lowCool;
+  CompMode wantedMode = desired.revValve ? CM_HEAT : CM_COOL;
 
-  // ── Mode-reversal guard ────────────────────────────────────
-  // If the reversing valve must change direction while the compressor is
-  // still spinning, we cannot wait for the interlock timer — the timer
-  // only starts when the compressor turns off, so interlockActive() would
-  // never fire.  Force the compressor off immediately, hold the valve in
-  // its current position, and let the normal anti-short-cycle logic below
-  // protect the restart in the new mode.
+  // ── Mode-reversal-while-running guard ──────────────────────
+  // If the reversing valve must change direction while the compressor
+  // is still spinning, the timer-based interlock can't help (it only
+  // starts when the compressor stops).  Force the compressor off
+  // immediately, hold the valve in its current position, and let the
+  // restart-protection block below gate the new direction.
   if (wasCompOn && wantsCompOn && (desired.revValve != out.revValve)) {
     desired.highCool = false;
     desired.lowCool  = false;
     desired.highHeat = false;
-    desired.revValve = out.revValve;   // hold valve; restart in new mode after interlock
+    desired.revValve = out.revValve;   // hold valve; new direction starts after lockout
     wantsCompOn      = false;          // compressor is now off — let timer start below
   }
 
-  // Start the interlock timer when the heat pump compressor turns off
+  // Start the interlock timer when the compressor turns off, and
+  // remember which direction it was running in so we can tell a same-
+  // direction restart from a reversal.
   if (wasCompOn && !wantsCompOn) {
     lastCompressorOffMs = millis();
+    lastCompressorMode  = out.revValve ? CM_HEAT : CM_COOL;
   }
 
-  // Block turning compressor ON during lockout (anti-short-cycle)
-  if (!wasCompOn && wantsCompOn && interlockActive()) {
+  // Block ONLY a direction reversal within the lockout window.
+  // Same-direction restarts go through immediately (no penalty).
+  bool isReversal = (lastCompressorMode != CM_NONE) &&
+                    (wantedMode != lastCompressorMode);
+  if (!wasCompOn && wantsCompOn && isReversal && interlockActive()) {
     desired.highCool = false;
     desired.lowCool  = false;
     desired.highHeat = false;
@@ -406,29 +447,38 @@ void runZoneLogic() {
   // ─────────────────────────────────────────────────────────
   // ZONE DAMPER LOGIC (rules 10–11)
   //
-  // Default state: OPEN.
-  // A secondary zone damper closes ONLY when its thermostat is
-  // calling for the opposite of what the main thermostat is running.
-  // When not calling (zone satisfied), damper stays open for circulation.
+  // While the system is ACTIVELY heating or cooling, a secondary zone's
+  // damper opens only if that zone is actively calling for the SAME
+  // mode the main thermostat is driving.  Any zone that isn't asking
+  // for the current mode (silent or wrong direction) → damper closes.
+  //
+  // While the system is idle / fan-only / dehumidifier-only, all zone
+  // dampers open for whole-house circulation.
   // ─────────────────────────────────────────────────────────
 
   bool mainIsHeating = desired.revValve && (desired.lowCool || desired.highCool);
   bool mainIsCooling = !desired.revValve && (desired.lowCool || desired.highCool);
 
   // Theater damper (gated by theaterEnabled config flag)
-  if (cfg.theaterEnabled) {
-    bool conflict = (inp.theaterHeat && mainIsCooling) ||
-                    (inp.theaterCool && mainIsHeating);
-    desired.theaterDamper = !conflict;   // open unless zone is fighting main mode
+  if (!cfg.theaterEnabled) {
+    desired.theaterDamper = true;            // zone disabled: always open
+  } else if (mainIsCooling) {
+    desired.theaterDamper = inp.theaterCool; // open only if zone calling cool too
+  } else if (mainIsHeating) {
+    desired.theaterDamper = inp.theaterHeat; // open only if zone calling heat too
   } else {
-    desired.theaterDamper = true;        // zone disabled: always open
+    desired.theaterDamper = true;            // idle / fan-only: open for circulation
   }
 
-  // Downstairs damper
-  {
-    bool conflict = (inp.downHeat && mainIsCooling) ||
-                    (inp.downCool && mainIsHeating);
-    desired.downDamper = !conflict;
+  // Downstairs damper (gated by downstairsEnabled config flag)
+  if (!cfg.downstairsEnabled) {
+    desired.downDamper = true;            // zone disabled: always open
+  } else if (mainIsCooling) {
+    desired.downDamper = inp.downCool;    // open only if zone calling cool too
+  } else if (mainIsHeating) {
+    desired.downDamper = inp.downHeat;    // open only if zone calling heat too
+  } else {
+    desired.downDamper = true;            // idle / fan-only: open for circulation
   }
 
   // ─────────────────────────────────────────────────────────
@@ -519,22 +569,28 @@ static String rpc_get_inputs() {
   return String(buf);
 }
 
-// Linux calls set_flags(hpo, ahn, trf, vok, vbl) → pushes SensorFlags
-static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl) {
-  sf.heatPumpOk    = hpo;
-  sf.auxHeatNeeded = ahn;
-  sf.tempRisingFast = trf;
-  sf.ventOk        = vok;
-  sf.ventBlocked   = vbl;
+// Linux calls set_flags(hpo, ahn, trf, vok, vbl, hmod, hhi) → pushes SensorFlags.
+// Arg order MUST match push_sensor_flags_to_mcu() in linux/bridge_daemon.py.
+static bool rpc_set_flags(bool hpo, bool ahn, bool trf, bool vok, bool vbl,
+                          bool hmod, bool hhi) {
+  sf.heatPumpOk       = hpo;
+  sf.auxHeatNeeded    = ahn;
+  sf.tempRisingFast   = trf;
+  sf.ventOk           = vok;
+  sf.ventBlocked      = vbl;
+  sf.humidityModerate = hmod;
+  sf.humidityHigh     = hhi;
   return true;
 }
 
-// Linux calls set_config(te, vph, mo, dmm) → pushes Config
-static bool rpc_set_config(bool te, int vph, bool mo, int dmm) {
-  cfg.theaterEnabled  = te;
-  cfg.ventMinPerHour  = (uint8_t)constrain(vph, 0, 60);
-  cfg.modeOverride    = mo;
-  cfg.dehumMaxMinutes = (uint8_t)constrain(dmm, 5, 120);
+// Linux calls set_config(te, vph, mo, dmm, de) → pushes Config.
+// Arg order MUST match push_config_to_mcu() in linux/bridge_daemon.py.
+static bool rpc_set_config(bool te, int vph, bool mo, int dmm, bool de) {
+  cfg.theaterEnabled    = te;
+  cfg.ventMinPerHour    = (uint8_t)constrain(vph, 0, 60);
+  cfg.modeOverride      = mo;
+  cfg.dehumMaxMinutes   = (uint8_t)constrain(dmm, 5, 120);
+  cfg.downstairsEnabled = de;
   return true;
 }
 

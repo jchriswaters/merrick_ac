@@ -12,16 +12,23 @@ RemainAfterExit=yes
 # Force host role even when an externally-powered USB hub is supplying VBUS,
 # which otherwise tricks the Type-C controller into device data role.
 # Without this, /dev/ttyUSB0 never appears and the RS485 sensor poll fails.
+# Try the /sys/class symlink first; fall back to the absolute device node
+# (the class symlink disappears when xhci deregisters but the device node stays).
 ExecStart=/bin/sh -c '\
-    role_path=/sys/class/usb_role/4e00000.usb-role-switch/role; \
-    if [ -w "$role_path" ]; then \
-        echo host > "$role_path"; \
-    else \
-        echo "uno-q-usb-host-role: $role_path not writable" >&2; \
-        exit 1; \
-    fi'
+    CLASS=/sys/class/usb_role/4e00000.usb-role-switch/role; \
+    DEV=/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/usb_role/4e00000.usb-role-switch/role; \
+    for p in "$CLASS" "$DEV"; do \
+        if [ -w "$p" ]; then echo host > "$p" && exit 0; fi; \
+    done; \
+    echo "uno-q-usb-host-role: no writable role path found" >&2; exit 1'
 # Sleep then re-assert so devices behind a slow-attaching hub are seen
-ExecStartPost=/bin/sh -c 'sleep 3; echo host > /sys/class/usb_role/4e00000.usb-role-switch/role || true'
+ExecStartPost=/bin/sh -c '\
+    sleep 3; \
+    CLASS=/sys/class/usb_role/4e00000.usb-role-switch/role; \
+    DEV=/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/usb_role/4e00000.usb-role-switch/role; \
+    for p in "$CLASS" "$DEV"; do \
+        [ -w "$p" ] && echo host > "$p" && break; \
+    done; true'
 
 [Install]
 WantedBy=multi-user.target

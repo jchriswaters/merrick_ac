@@ -1,0 +1,19 @@
+[Unit]
+Description=HVAC HMI Web Server
+Documentation=https://github.com/jchriswaters/merrick_ac
+After=network.target hvac-bridge.service arduino-router.service
+Wants=hvac-bridge.service
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino/hvac-controller/desktop-hmi
+ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --log-level info
+Restart=always
+RestartSec=5
+# Give bridge_daemon a head start on boot so the status cache exists
+# before the HMI first tries to read it.
+ExecStartPre=/bin/sleep 3
+
+[Install]
+WantedBy=multi-user.target
