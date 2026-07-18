@@ -857,9 +857,19 @@ def run() -> None:
         cloud_client.on_connect    = on_cloud_connect
         cloud_client.on_disconnect = on_cloud_disconnect
 
+        # Resolve hostname to IPv4 explicitly — paho may otherwise pick up an
+        # IPv6 address from DNS and hang if IPv6 routing to the broker is broken.
+        import socket as _socket
         try:
-            cloud_client.connect(cloud_host, cloud_port, keepalive=60)
-            cloud_client.loop_start()
+            _ai = _socket.getaddrinfo(cloud_host, cloud_port, _socket.AF_INET)
+            cloud_connect_host = _ai[0][4][0]
+            log.info("Cloud MQTT broker resolved to IPv4 %s", cloud_connect_host)
+        except Exception:
+            cloud_connect_host = cloud_host   # fall back to hostname
+
+        cloud_client.loop_start()   # start loop thread before connect so reconnects work
+        try:
+            cloud_client.connect(cloud_connect_host, cloud_port, keepalive=60)
         except Exception as exc:
             log.warning("Cloud MQTT initial connect failed: %s — will retry in background", exc)
 
