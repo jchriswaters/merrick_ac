@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-06-01
+Last updated: 2026-07-18
 
 ---
 
@@ -39,13 +39,20 @@ codebase or pasting a transcript.
 
 ---
 
-## Current status (2026-05-31)
+## Current status (2026-07-18)
 
 **Working:**
 - MCU sketch runs; RPC methods `get_outputs` / `get_inputs` / `set_flags` /
   `set_config` registered and responding.
 - `arduino-router.service` + `hvac-bridge.service` both active and enabled.
-- `uno-q-usb-host-role.service` forces USB-C host role on boot.
+- `uno-q-usb-host-role.service` forces USB-C host role on boot.  Now tries
+  the `/sys/class` symlink first and falls back to the absolute device node
+  path — the class symlink disappears when xhci deregisters mid-run but the
+  device node remains writable.
+- `usb-host-role-monitor.service` (new) — persistent service that polls the
+  USB-C data role every 10 s and re-asserts host if it ever flips to device
+  mid-operation (e.g. VBUS glitch from the powered hub).  Logs via `logger`
+  to journald.  Eliminates the need for manual intervention after role flips.
 - Powered USB hub → FTDI USB-RS485 → `/dev/ttyUSB0` enumerating.
 - RS485 sensors: **indoor SHT30 (0x01) and outdoor SHT30 (0x02) both
   reading** live temp/humidity.
@@ -53,6 +60,8 @@ codebase or pasting a transcript.
   topic `jchriswaters_merrick_ac`) — feeds the mqtt-to-snowflake Snowflake
   pipeline on GCP.  Local mosquitto retained for command/config channels
   only (`home/hvac/cmd`, `home/hvac/config`).
+  **Cloud publish confirmed working** (2026-07-18) — verified live messages
+  arriving at HiveMQ.  IPv4 forced at connect time (see gotcha 13).
 - **HMI deployed on the controller** (`hvac-hmi.service`) — accessible at
   `http://192.168.1.197:8000` from any browser on the LAN.  No laptop
   needed.  Running in `local_mode=true`: RPC goes direct to the
@@ -133,8 +142,9 @@ codebase or pasting a transcript.
 - `web_config.py` Flask config API — present in repo, superseded by the
   HMI settings panel; not re-verified and likely unused.
 - HMI CrowPanel ESP32 (`hmi/crowpanel_hvac/`) — not deployed/verified.
-- RS485 auto-reconnect deployed but not yet tested through a real power-cycle
-  (verified manually: /dev/ttyUSB0 present, sensors reading).
+- RS485 auto-reconnect **verified** through a real USB host-role drop event
+  (2026-07-18): sensors recovered automatically within one poll cycle once
+  `/dev/ttyUSB0` reappeared after the role was restored.
 
 ---
 
@@ -207,6 +217,23 @@ cost real debugging time to discover.  Detail in `docs/deployment.md`.
     restart needed.  Trigger for reset: both SHT30 reads fail in the same
     cycle → client closed → reconnect attempted next cycle.
 
+13. **USB-C data role can flip back to `device` mid-operation** — even after
+    `uno-q-usb-host-role.service` ran at boot, a VBUS glitch from the powered
+    hub can cause the PD controller to re-negotiate and flip to device role,
+    tearing down the xhci host controller and losing `/dev/ttyUSB0` without
+    any reboot.  The `/sys/class/usb_role/` symlink also disappears with xhci,
+    but the absolute device node
+    `/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/usb_role/4e00000.usb-role-switch/role`
+    remains writable.  `usb-host-role-monitor.service` now watches and
+    re-asserts host every 10 s autonomously.
+
+14. **`broker.hivemq.com` resolves to IPv6 first, IPv6 routing is broken.**
+    paho-mqtt picks up the AAAA record and the MQTT handshake hangs silently —
+    no error, no timeout, no `on_connect` callback.  Fixed in bridge_daemon by
+    resolving to IPv4 explicitly via `socket.getaddrinfo(AF_INET)` before
+    calling `connect()`.  Symptom if it regresses: "Cloud MQTT broker resolved
+    to IPv4" line absent from startup logs and no messages on HiveMQ.
+
 ---
 
 ## Repo map
@@ -233,7 +260,6 @@ sim/         offline simulator + sensor bench tools
 - Add `NOPASSWD` sudoers entry for `arduino` user to allow remote service
   restarts (needed for MCU auto-recover and remote `systemctl restart`):
   `arduino ALL=(ALL) NOPASSWD: /bin/systemctl restart hvac-bridge, /bin/systemctl restart arduino-router`
-- Verify Snowflake pipeline is receiving `jchriswaters_merrick_ac` messages
-  from HiveMQ now that bridge_daemon publishes there.
-  See `mqtt-to-snowflake/TROUBLESHOOTING.md` for how to trigger a manual flush
-  and query Snowflake to confirm records landed.
+- Verify Snowflake pipeline is receiving `jchriswaters_merrick_ac` messages —
+  HiveMQ publish confirmed working 2026-07-18; wait for next flush cycle or
+  trigger a manual flush per `mqtt-to-snowflake/TROUBLESHOOTING.md`.

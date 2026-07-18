@@ -60,21 +60,29 @@ up, and even though VBUS is present nothing enumerates downstream. The cure is
 to force the role back to `host` in software:
 
 ```bash
+# Try the /sys/class symlink first (works if xhci is still registered):
 sudo sh -c 'echo host > /sys/class/usb_role/4e00000.usb-role-switch/role'
+
+# If that returns "No such file or directory" (xhci deregistered), use the
+# absolute device node — this path survives xhci teardown:
+sudo sh -c 'echo host > /sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/usb_role/4e00000.usb-role-switch/role'
 ```
 
 That write **does** succeed (unlike writes to `power_role`). After the role
 switch, `xhci-hcd` initialises the host controller and the hub + downstream
-devices enumerate normally.
+devices enumerate normally within a few seconds.
 
-Because the role detection re-runs on every boot, this fix has to be applied
-on every boot. The repo ships a systemd unit that does it automatically:
+Because the role detection can re-run on every boot **and** mid-operation (a
+VBUS glitch from the hub is enough to cause the PD controller to re-negotiate
+and flip to device), this fix needs to be applied persistently. The repo ships
+two systemd units that do it automatically:
 
 ```
-linux/uno-q-usb-host-role.service
+linux/uno-q-usb-host-role.service   — oneshot at boot
+linux/usb-host-role-monitor.service — persistent 10-second poll
 ```
 
-Install it with the rest of the units in §1.7 below.
+Install both with the rest of the units in §1.7 below.
 
 ### 1.4 Clone the repo on the board
 
@@ -124,19 +132,33 @@ ensuring the router is fully open on `/dev/ttyHS1` before the MCU boots.
 # on the board
 sudo cp ~/hvac-controller/linux/hvac-bridge.service /etc/systemd/system/
 sudo cp ~/hvac-controller/linux/uno-q-usb-host-role.service /etc/systemd/system/
+sudo cp ~/hvac-controller/linux/usb-host-role-monitor.service /etc/systemd/system/
+sudo cp ~/hvac-controller/desktop-hmi/hvac-hmi.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable uno-q-usb-host-role.service
+sudo systemctl enable usb-host-role-monitor.service
 sudo systemctl enable hvac-bridge.service
+sudo systemctl enable hvac-hmi.service
 sudo systemctl start uno-q-usb-host-role.service   # apply role fix now
-# leave hvac-bridge stopped for now — we still need to flash the MCU
+sudo systemctl start usb-host-role-monitor.service
+# leave hvac-bridge and hvac-hmi stopped for now — still need to flash the MCU
 ```
 
 - `uno-q-usb-host-role.service` — on every boot, forces the Type-C controller's
   data role back to `host` so the USB hub + FTDI dongle enumerate (see §1.3).
-  Without this, `/dev/ttyUSB0` will not appear after reboot.
+  Tries the `/sys/class/usb_role/` symlink first, falls back to the absolute
+  device node path (the class symlink disappears when xhci deregisters mid-run).
+- `usb-host-role-monitor.service` — persistent service that polls the USB-C
+  data role every 10 s and re-asserts `host` if it ever flips to `device` during
+  normal operation (e.g. a VBUS glitch from the powered hub causes the PD
+  controller to re-negotiate). Logs recoveries via `logger(1)` to journald.
+  Required in addition to the oneshot above.
 - `hvac-bridge.service` — the Python bridge daemon. Runs as user `arduino` from
   `/home/arduino/hvac-controller/linux/`. Uses `Type=notify` + `WatchdogSec=60`
   so systemd kills + restarts it if the main polling loop ever hangs.
+- `hvac-hmi.service` — the web-based HMI server. Runs as user `arduino` from
+  `/home/arduino/hvac-controller/desktop-hmi/`. Serves on port 8000 — see §5
+  for how to access it.
 
 ### 1.7a Optional — MCU auto-recovery via sudoers
 
@@ -325,6 +347,95 @@ is up but RS485 polling is failing. Common causes:
 | `/dev/ttyUSB0` present but Modbus timeouts | Bus wiring (A+/B- swapped), wrong baud, sensor not powered, missing termination |
 | All sensors fail | Adapter dead, missing GND reference, or RS485 wires reversed |
 | One sensor fails | DIP-switch address mismatch, or that sensor's V+ wire loose |
+
+---
+
+## 5. Accessing the web HMI
+
+The HVAC controller hosts a browser-based dashboard (`hvac-hmi.service`) on
+port 8000. No software to install — open any browser on the local WiFi network.
+
+### 5.1 Normal access
+
+| URL | `http://192.168.1.197:8000` |
+|---|---|
+| Works from | Any phone, tablet, or laptop on the same WiFi / LAN |
+| Login required | No |
+| Refresh | Live — WebSocket updates every 10 s |
+
+Just open the URL and the dashboard loads. If you bookmark it on your phone's
+home screen it works like a native app.
+
+### 5.2 What the HMI shows
+
+- **Heat Pump card** — current operating mode (off / fan / low_cool / high_cool /
+  dehum / heat), compressor state, indoor and outdoor temperature and humidity
+- **Zone cards** — live thermostat input states for main, downstairs, and theater
+  zones; zone enable/disable toggles
+- **Input simulation** — force any thermostat input ON / OFF / AUTO for testing
+  without physically calling from the thermostat
+- **System Settings panel** — all 12 configurable parameters (temperature
+  thresholds, humidity limits, vent schedule, zone enables, MCU watchdog settings)
+- **Connection indicator** — green (controller reachable, MCU healthy), amber
+  (controller reachable but MCU unresponsive), red (controller unreachable)
+
+### 5.3 Troubleshooting the HMI
+
+**"Cannot connect" / page not loading:**
+
+```bash
+# On the controller — is the service running?
+systemctl status hvac-hmi --no-pager
+
+# If stopped:
+sudo systemctl start hvac-hmi
+
+# Watch startup logs:
+journalctl -u hvac-hmi -n 30 --no-pager
+```
+
+**HMI loads but shows no sensor data / all readings are `?`:**
+
+The HMI reads `/tmp/hvac_status.json`, written by `hvac-bridge.service` every
+10 s.  Check that the bridge is running and sensors are reading:
+
+```bash
+systemctl status hvac-bridge --no-pager
+journalctl -u hvac-bridge -n 10 --no-pager
+cat /tmp/hvac_status.json
+```
+
+**Installing the HMI service for the first time:**
+
+```bash
+# On the board — install Python dependencies for the HMI server
+pip3 install --break-system-packages fastapi "uvicorn[standard]" msgpack websockets
+
+# Deploy the service unit
+sudo cp ~/hvac-controller/desktop-hmi/hvac-hmi.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hvac-hmi.service
+
+# Verify it's up
+curl -s http://localhost:8000/ | head -5
+```
+
+**`config.json` on the board** (not committed — board-specific):
+
+```json
+{
+  "local_mode": true,
+  "controller_host": "192.168.1.197",
+  "router_socket": "/var/run/arduino-router.sock",
+  "mqtt_cmd_topic": "home/hvac/cmd",
+  "poll_interval_s": 1.0
+}
+```
+
+`local_mode: true` makes the HMI talk directly to the arduino-router Unix socket
+for RPC and read `/tmp/hvac_status.json` for sensor data — no SSH needed.
+If this file is missing on the board, create it at
+`/home/arduino/hvac-controller/desktop-hmi/config.json`.
 
 ---
 
