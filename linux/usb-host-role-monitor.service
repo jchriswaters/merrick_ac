@@ -1,0 +1,36 @@
+[Unit]
+Description=Monitor and re-assert USB-C host data role
+Documentation=https://github.com/jchriswaters/merrick_ac/blob/master/docs/deployment.md
+After=uno-q-usb-host-role.service
+Wants=uno-q-usb-host-role.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+# Poll the USB-C data role every 10 seconds.  If anything (e.g. a VBUS
+# glitch from the powered hub) causes the PD controller to flip back to
+# device mode, re-assert host within one poll interval.  Uses the absolute
+# device node path because the /sys/class symlink disappears when the xhci
+# host controller deregisters.
+ExecStart=/bin/sh -c '\
+    CLASS=/sys/class/usb_role/4e00000.usb-role-switch/role; \
+    DEV=/sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/usb_role/4e00000.usb-role-switch/role; \
+    while true; do \
+        for p in "$CLASS" "$DEV"; do \
+            if [ -f "$p" ]; then \
+                role=$(cat "$p" 2>/dev/null); \
+                if [ "$role" != "host" ]; then \
+                    logger -t usb-host-role-monitor "USB data role is \"$role\", re-asserting host on $p"; \
+                    echo host > "$p" 2>/dev/null \
+                        && logger -t usb-host-role-monitor "host role restored" \
+                        || logger -t usb-host-role-monitor "WARNING: failed to write host to $p"; \
+                fi; \
+                break; \
+            fi; \
+        done; \
+        sleep 10; \
+    done'
+
+[Install]
+WantedBy=multi-user.target
