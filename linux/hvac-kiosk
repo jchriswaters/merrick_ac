@@ -1,40 +1,67 @@
 #!/bin/bash
 # Industrial-style kiosk: waits for HMI on boot, auto-restarts Chromium on crash,
-# and kills/restarts Chromium whenever the HMI service goes down and comes back up.
+# restarts Chromium when HMI service recovers, and re-drives the DP signal
+# when the USB hub is replugged (which drops the DP Alt Mode video signal).
 
 xset s off
 xset s noblank
 xset -dpms
 
 HMI_URL=http://127.0.0.1:8000
+CONNECTOR=/sys/class/drm/card0/card0-DP-1
+XENV="DISPLAY=:0 XAUTHORITY=/home/arduino/.Xauthority"
 
 # Wait for the HMI server to be ready before launching Chromium.
-# This handles the race between lightdm autologin and hvac-hmi.service startup.
 until curl -sf "$HMI_URL" > /dev/null 2>&1; do
     sleep 2
 done
 
-# Background watchdog: if the HMI goes down while Chromium is running,
-# wait for it to come back, then kill Chromium so the main loop below
+# Watchdog 1: HMI service recovery.
+# If port 8000 goes away and comes back, kill Chromium so the main loop
 # relaunches it cleanly against a live server.
 (
     while true; do
         sleep 10
         if ! curl -sf "$HMI_URL" > /dev/null 2>&1; then
-            # HMI is down -- wait for it to recover
             until curl -sf "$HMI_URL" > /dev/null 2>&1; do
                 sleep 3
             done
-            # HMI back up -- kill Chromium so the main loop relaunches it
             pkill -f "chromium.*127.0.0.1:8000" 2>/dev/null
         fi
     done
 ) &
-WATCHDOG_PID=$!
 
-# Main loop: Chromium runs here. If it exits for any reason (crash, killed
-# by watchdog, OOM) it is restarted. Loop also re-waits for HMI readiness
-# in case of a bridge restart.
+# Watchdog 2: DP Alt Mode signal recovery.
+# When the USB hub is unplugged and replugged the DP video signal drops.
+# Xorg keeps running but the monitor goes dark. Detect this by watching
+# the DRM connector status and DPMS state, then re-assert the output mode.
+(
+    prev_status="connected"
+    while true; do
+        sleep 5
+        status=$(cat "$CONNECTOR/status" 2>/dev/null)
+        dpms=$(cat "$CONNECTOR/dpms" 2>/dev/null)
+
+        # Connector just came back after being disconnected (hub replug)
+        if [ "$status" = "connected" ] && [ "$prev_status" = "disconnected" ]; then
+            sleep 2  # let the DP link train settle
+            env $XENV xrandr --output DP-1 --off
+            sleep 1
+            env $XENV xrandr --output DP-1 --auto
+            env $XENV xset -dpms
+        fi
+
+        # Connected but DPMS put the display to sleep (belt-and-suspenders)
+        if [ "$status" = "connected" ] && [ "$dpms" != "On" ]; then
+            env $XENV xset dpms force on
+            env $XENV xset -dpms
+        fi
+
+        prev_status="$status"
+    done
+) &
+
+# Main loop: Chromium restarts automatically on crash or watchdog kill.
 while true; do
     /usr/bin/chromium --kiosk --noerrdialogs --disable-infobars \
         --disable-session-crashed-bubble --no-first-run --incognito \
