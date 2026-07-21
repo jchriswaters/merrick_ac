@@ -195,7 +195,10 @@
       }
     } catch (e) { console.error("save failed", e); }
     btn.textContent = "Save";
-    // Cleanup happens when the next snapshot arrives via updateSettings()
+    // Mark clean immediately so updateSettings() doesn't skip this row on
+    // the next snapshot (it skips dirty rows to avoid clobbering in-flight edits).
+    row.dataset.serverValue = JSON.stringify(value);
+    markClean(row);
   }
 
   function updateSettings(snap) {
