@@ -1,20 +1,28 @@
 #!/bin/bash
 # Industrial-style kiosk: waits for HMI on boot, auto-restarts Chromium on crash,
 # restarts Chromium when HMI service recovers, and re-drives the DP signal
-# when the USB hub is replugged (which drops the DP Alt Mode video signal).
+# when the USB hub is replugged.
+#
+# Uses /usr/lib/chromium/chromium directly (bypasses the Debian wrapper which
+# injects --load-extension and consumes --kiosk as the extension path value).
+# Runs openbox as a minimal window manager so --kiosk fullscreen requests work.
 
 xset s off
 xset s noblank
 xset -dpms
 
 HMI_URL=http://127.0.0.1:8000
+CHROMIUM=/usr/lib/chromium/chromium
 CONNECTOR=/sys/class/drm/card0/card0-DP-1
 XENV="DISPLAY=:0 XAUTHORITY=/home/arduino/.Xauthority"
 
+# Minimal window manager -- required for Chromium --kiosk fullscreen to work.
+# Without a WM, --kiosk has no one to honor the fullscreen request and the
+# window stays at its default size.
+openbox --sm-disable &
+
 # Wait for the HMI server to be ready before launching Chromium.
-until curl -sf "$HMI_URL" > /dev/null 2>&1; do
-    sleep 2
-done
+until curl -sf "$HMI_URL" > /dev/null 2>&1; do sleep 2; done
 
 # Watchdog 1: HMI service recovery.
 # If port 8000 goes away and comes back, kill Chromium so the main loop
@@ -23,36 +31,34 @@ done
     while true; do
         sleep 10
         if ! curl -sf "$HMI_URL" > /dev/null 2>&1; then
-            until curl -sf "$HMI_URL" > /dev/null 2>&1; do
-                sleep 3
-            done
+            until curl -sf "$HMI_URL" > /dev/null 2>&1; do sleep 3; done
             pkill -f "chromium.*127.0.0.1:8000" 2>/dev/null
         fi
     done
 ) &
 
 # Watchdog 2: DP Alt Mode signal recovery.
-# When the USB hub is unplugged and replugged the DP video signal drops.
-# Xorg keeps running but the monitor goes dark. Detect this by watching
-# the DRM connector status and DPMS state, then re-assert the output mode.
+# When the USB hub is unplugged and replugged the DP video signal drops and
+# the monitor may change (different resolution). Detect connector transitions,
+# re-assert the output mode, then kill Chromium so it relaunches at the
+# correct resolution for whatever monitor is now attached.
 (
-    prev_status="connected"
+    prev_status=connected
     while true; do
         sleep 5
         status=$(cat "$CONNECTOR/status" 2>/dev/null)
         dpms=$(cat "$CONNECTOR/dpms" 2>/dev/null)
 
-        # Connector just came back after being disconnected (hub replug)
-        if [ "$status" = "connected" ] && [ "$prev_status" = "disconnected" ]; then
-            sleep 2  # let the DP link train settle
+        if [ "$status" = connected ] && [ "$prev_status" = disconnected ]; then
+            sleep 2
             env $XENV xrandr --output DP-1 --off
             sleep 1
             env $XENV xrandr --output DP-1 --auto
             env $XENV xset -dpms
+            pkill -f "chromium.*127.0.0.1:8000" 2>/dev/null
         fi
 
-        # Connected but DPMS put the display to sleep (belt-and-suspenders)
-        if [ "$status" = "connected" ] && [ "$dpms" != "On" ]; then
+        if [ "$status" = connected ] && [ "$dpms" != On ]; then
             env $XENV xset dpms force on
             env $XENV xset -dpms
         fi
@@ -63,11 +69,11 @@ done
 
 # Main loop: Chromium restarts automatically on crash or watchdog kill.
 while true; do
-    /usr/bin/chromium --kiosk --noerrdialogs --disable-infobars \
+    $CHROMIUM --kiosk --noerrdialogs --disable-infobars \
         --disable-session-crashed-bubble --no-first-run --incognito \
+        --disable-dev-shm-usage --enable-gpu-rasterization \
+        --no-default-browser-check \
         "$HMI_URL"
     sleep 3
-    until curl -sf "$HMI_URL" > /dev/null 2>&1; do
-        sleep 2
-    done
+    until curl -sf "$HMI_URL" > /dev/null 2>&1; do sleep 2; done
 done
