@@ -92,6 +92,32 @@
     </span>
   </footer>
 
+  <!-- Numeric keypad modal -->
+  <div class="numpad-overlay" id="numpad-overlay" hidden>
+    <div class="numpad-modal">
+      <div class="numpad-title" id="numpad-title">Enter value</div>
+      <div class="numpad-range" id="numpad-range"></div>
+      <div class="numpad-display" id="numpad-display">0</div>
+      <div class="numpad-keys">
+        <button class="nk" data-val="7">7</button>
+        <button class="nk" data-val="8">8</button>
+        <button class="nk" data-val="9">9</button>
+        <button class="nk" data-val="4">4</button>
+        <button class="nk" data-val="5">5</button>
+        <button class="nk" data-val="6">6</button>
+        <button class="nk" data-val="1">1</button>
+        <button class="nk" data-val="2">2</button>
+        <button class="nk" data-val="3">3</button>
+        <button class="nk nk-zero" data-val="0">0</button>
+        <button class="nk nk-bksp" data-action="bksp">⌫</button>
+      </div>
+      <div class="numpad-actions">
+        <button class="numpad-cancel" id="numpad-cancel">Cancel</button>
+        <button class="numpad-ok" id="numpad-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

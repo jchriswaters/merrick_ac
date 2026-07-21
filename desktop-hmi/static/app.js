@@ -119,6 +119,9 @@
         if (f.min != null) num.min = f.min;
         if (f.max != null) num.max = f.max;
         num.step = 1;
+        num.readOnly = true;
+        num.style.cursor = "pointer";
+        num.addEventListener("click", () => openNumpad(num, f));
         controlDiv.appendChild(num);
         if (f.unit) {
           const u = document.createElement("span");
@@ -377,6 +380,63 @@
   }
 
   // ────────────────────────────────────────────────
+  // Numeric keypad modal
+  // ────────────────────────────────────────────────
+
+  let numpadTarget = null;   // the <input> we're editing
+  let numpadField  = null;   // field metadata {label, min, max, unit}
+  let numpadVal    = "";     // string being built
+
+  function openNumpad(inputEl, field) {
+    numpadTarget = inputEl;
+    numpadField  = field;
+    numpadVal    = inputEl.value !== "" ? String(inputEl.value) : "";
+
+    $("numpad-title").textContent = field.label;
+    const hasRange = field.min != null || field.max != null;
+    $("numpad-range").textContent = hasRange
+      ? `Range: ${field.min ?? "—"} – ${field.max ?? "—"}${field.unit ? " " + field.unit : ""}`
+      : "";
+    renderNumpadDisplay();
+    $("numpad-overlay").hidden = false;
+  }
+
+  function renderNumpadDisplay() {
+    const disp = $("numpad-display");
+    disp.textContent = numpadVal === "" ? "0" : numpadVal;
+    const n = parseFloat(numpadVal);
+    const outOfRange = numpadVal !== "" && Number.isFinite(n) && (
+      (numpadField.min != null && n < numpadField.min) ||
+      (numpadField.max != null && n > numpadField.max)
+    );
+    disp.classList.toggle("invalid", outOfRange);
+    $("numpad-ok").disabled = numpadVal === "" || !Number.isFinite(n) || outOfRange;
+  }
+
+  function numpadPress(val) {
+    if (val === "bksp") {
+      numpadVal = numpadVal.slice(0, -1);
+    } else {
+      if (numpadVal === "0") numpadVal = "";
+      numpadVal += val;
+    }
+    renderNumpadDisplay();
+  }
+
+  function numpadCommit() {
+    const n = parseFloat(numpadVal);
+    if (!Number.isFinite(n)) return;
+    numpadTarget.value = n;
+    numpadTarget.dispatchEvent(new Event("change", { bubbles: true }));
+    closeNumpad();
+  }
+
+  function closeNumpad() {
+    $("numpad-overlay").hidden = true;
+    numpadTarget = null;
+  }
+
+  // ────────────────────────────────────────────────
   // Bootstrap
   // ────────────────────────────────────────────────
 
@@ -414,6 +474,20 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     $("sim-clear-btn").addEventListener("click", clearAllOverrides);
+
+    // Numpad key events
+    document.querySelectorAll(".nk").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const action = btn.dataset.action;
+        numpadPress(action || btn.dataset.val);
+      });
+    });
+    $("numpad-ok").addEventListener("click", numpadCommit);
+    $("numpad-cancel").addEventListener("click", closeNumpad);
+    $("numpad-overlay").addEventListener("click", (e) => {
+      if (e.target === $("numpad-overlay")) closeNumpad();
+    });
+
     await fetchMetadata();
     connectWS();
   });
