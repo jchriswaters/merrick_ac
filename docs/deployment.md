@@ -379,6 +379,13 @@ home screen it works like a native app.
 - **Connection indicator** — green (controller reachable, MCU healthy), amber
   (controller reachable but MCU unresponsive), red (controller unreachable)
 
+The HMI is touch-optimised for the kiosk display:
+- All action buttons are 44–48 px tall (meets touch target guidelines)
+- Tapping any numeric setting field opens a **large numeric keypad modal** —
+  no system keyboard required.  The keypad shows the setting name, valid range,
+  and a backspace key.  OK is disabled if the entered value is out of range.
+- Boolean settings use an oversized toggle switch (58×32 px).
+
 ### 5.3 Troubleshooting the HMI
 
 **"Cannot connect" / page not loading:**
@@ -462,8 +469,10 @@ dongle, so both video and sensor data run through the single USB-C port.
 # SSH to the controller
 ssh arduino@192.168.1.197
 
-# Install Xorg modesetting driver (fbdev is pre-installed on the Uno Q image)
-sudo apt-get install -y xserver-xorg-video-modesetting
+# Install Xorg modesetting driver and openbox window manager
+# (fbdev is pre-installed; openbox is required for --kiosk fullscreen to work —
+# without a WM, Chromium has no one to honor the fullscreen request)
+sudo apt-get install -y xserver-xorg-video-modesetting openbox
 
 # Install the kiosk launcher script
 sudo cp ~/hvac-controller/linux/hvac-kiosk /usr/local/bin/hvac-kiosk
@@ -480,37 +489,71 @@ sudo cp ~/hvac-controller/linux/99-hvac-kiosk.conf /etc/lightdm/lightdm.conf.d/9
 sudo systemctl restart lightdm
 ```
 
-### 6.3 Verify
+### 6.3 Self-healing behaviour
+
+The kiosk script (`linux/hvac-kiosk`) is designed to recover from every
+failure mode without manual intervention:
+
+| Failure | Recovery |
+|---|---|
+| Power outage / reboot | lightdm auto-logins on boot; script polls port 8000 before launching Chromium |
+| Chromium crash / OOM | `while` loop restarts it after 3 s |
+| hvac-hmi service crash | Watchdog detects port 8000 going away, waits for recovery, kills and relaunches Chromium |
+| Hub unplug / replug (DP signal lost) | Watchdog detects DRM connector transition, runs `xrandr --output DP-1 --off/--auto`, kills Chromium to relaunch at new resolution |
+| Monitor swap (different resolution) | Same as hub replug — xrandr picks up new EDID, Chromium relaunches at native resolution |
+| lightdm crash | systemd restarts it (`Restart=always`) |
+
+### 6.4 Verify
 
 ```bash
-# Chromium should be running
-pgrep -a chromium | head -3
+# Chromium running fullscreen (expect 1920x1080+0+0 or similar)
+DISPLAY=:0 XAUTHORITY=/home/arduino/.Xauthority xwininfo -root -tree | grep -i chromium
 
-# Any startup errors (mostly benign)
+# Openbox and watchdog processes
+pgrep -a openbox
+pgrep -af hvac-kiosk
+
+# Any startup errors (mostly benign DBus/UPower noise)
 tail -20 ~/.xsession-errors
 ```
 
-### 6.4 Troubleshooting
+### 6.5 Troubleshooting
 
 **Monitor shows nothing:**
 - Run `cat /sys/class/drm/card0-DP-1/status` — must say `connected`.
-  If it says `disconnected`, the hub or cable isn't seated.
-- Run `ls /dev/fb0` — must exist.  If missing, the ANX7625 DP Alt Mode bridge
-  hasn't initialised; reseating the USB-C hub cable usually fixes this.
+  If `disconnected`, the hub or cable isn't seated.
+- Run `ls /dev/fb0` — must exist.  If missing, reseat the USB-C hub cable.
+- The DP watchdog runs every 5 s and will auto-recover once the connector
+  status transitions back to `connected`.
+
+**HMI only fills part of the screen:**
+- Chromium window is not fullscreen — likely `openbox` is not installed or
+  not running.  Install it (`sudo apt-get install -y openbox`) and restart
+  lightdm.
+- Verify with `xwininfo` (see §6.4) — the window geometry should match the
+  screen resolution exactly (e.g. `1920x1080+0+0`).
 
 **"This site can't be reached" in Chromium:**
-- Use `http://127.0.0.1:8000` (not `localhost`) — `localhost` resolves to IPv6
-  `::1` first, but the HMI only listens on IPv4.  The kiosk script already uses
-  `127.0.0.1`.
-- Check `systemctl is-active hvac-hmi`.
+- The kiosk script polls port 8000 before launching Chromium, so this should
+  not appear at boot.  If it does, check `systemctl is-active hvac-hmi`.
+- The script uses `http://127.0.0.1:8000` explicitly — `localhost` resolves
+  to IPv6 `::1` first but the HMI only binds IPv4.
 
 **Display goes black / screen saver:**
-- `xset s off; xset -dpms` in the kiosk script suppresses this.
-  If it still blanks, check that lightdm restarted after the config was installed.
+- `xset s off; xset -dpms` in the kiosk script disables blanking.
+  The DPMS watchdog also re-wakes the display if it goes to sleep while
+  physically connected.
 
 **Session reverts to login greeter:**
-- Verify `/etc/lightdm/lightdm.conf.d/99-hvac-kiosk.conf` exists and contains
-  `autologin-user=arduino`.
+- Verify `/etc/lightdm/lightdm.conf.d/99-hvac-kiosk.conf` exists and
+  contains `autologin-user=arduino`.
+
+**Updating the kiosk script after a repo change:**
+
+```bash
+sudo cp ~/hvac-controller/linux/hvac-kiosk /usr/local/bin/hvac-kiosk
+sudo systemctl restart lightdm
+```
 
 ---
 

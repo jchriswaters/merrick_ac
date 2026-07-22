@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-07-18
+Last updated: 2026-07-20
 
 ---
 
@@ -67,6 +67,21 @@ codebase or pasting a transcript.
   needed.  Running in `local_mode=true`: RPC goes direct to the
   arduino-router Unix socket; sensor data reads `/tmp/hvac_status.json`
   written by bridge_daemon each cycle; commands publish to local mosquitto.
+- **Kiosk display** — monitor connected via USB-C hub → HDMI shows HMI
+  full-screen.  lightdm auto-logins `arduino` into a kiosk X session on
+  every boot.  Three self-healing watchdogs run inside the kiosk script:
+  (1) boot-time wait for port 8000 before launching Chromium; (2) HMI
+  service crash recovery — kills and relaunches Chromium when the server
+  comes back; (3) DP Alt Mode signal recovery — detects hub replug via
+  DRM sysfs, runs `xrandr --output DP-1 --off/--auto`, kills Chromium so
+  it relaunches at the correct resolution.  Openbox runs as a minimal WM
+  so Chromium `--kiosk` fullscreen requests are honored.  See
+  `docs/deployment.md §6` and `linux/hvac-kiosk`.
+- **Touch-friendly HMI** — numeric keypad modal pops up when tapping any
+  number field in System Settings (no system keyboard required); all
+  action buttons enlarged to 44–48 px touch targets; toggle switches
+  grown to 58×32 px.  Settings save-highlight bug fixed (row now clears
+  immediately on Save rather than staying amber indefinitely).
 
 - Desktop HMI **input simulation** (Phase 2) — DONE.  AUTO / FORCE ON /
   FORCE OFF per input card; verified forcing Main Y1 engages low_cool and
