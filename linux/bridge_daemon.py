@@ -78,7 +78,7 @@ RS485_TIMEOUT  = 1.0              # seconds per Modbus request
 POLL_INTERVAL_S = 10
 
 HISTORY_DB              = Path("/home/arduino/hvac-controller/data/history.db")
-HISTORY_WRITE_INTERVAL_S = 60    # write one row per minute
+HISTORY_WRITE_INTERVAL_S = 20    # write one row every 20 s
 HISTORY_RETAIN_DAYS     = 32     # purge rows older than this
 
 MQTT_STATUS  = "home/hvac/status"
