@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import struct
 import threading
 import time
@@ -75,6 +76,10 @@ RS485_BAUD     = 9600
 RS485_TIMEOUT  = 1.0              # seconds per Modbus request
 
 POLL_INTERVAL_S = 10
+
+HISTORY_DB              = Path("/home/arduino/hvac-controller/data/history.db")
+HISTORY_WRITE_INTERVAL_S = 60    # write one row per minute
+HISTORY_RETAIN_DAYS     = 32     # purge rows older than this
 
 MQTT_STATUS  = "home/hvac/status"
 MQTT_CONFIG  = "home/hvac/config"
@@ -196,6 +201,56 @@ def save_config(cfg: dict) -> None:
         tmp.replace(CONFIG_PATH)
     except Exception as exc:
         log.error("Failed to save config: %s", exc)
+
+# ──────────────────────────────────────────────────────────────
+# SQLITE HISTORY — rolling 32-day ring buffer of sensor readings
+# ──────────────────────────────────────────────────────────────
+
+def _open_history_db() -> Optional[sqlite3.Connection]:
+    try:
+        HISTORY_DB.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(HISTORY_DB), check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                ts                    INTEGER PRIMARY KEY,
+                indoor_temp_f         REAL,
+                outdoor_temp_f        REAL,
+                indoor_humidity_pct   REAL,
+                outdoor_humidity_pct  REAL,
+                ac_current_a          REAL,
+                dehum_current_a       REAL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON history(ts)")
+        conn.commit()
+        log.info("History DB opened: %s", HISTORY_DB)
+        return conn
+    except Exception as exc:
+        log.error("History DB open failed: %s — history logging disabled", exc)
+        return None
+
+
+def _write_history(conn: sqlite3.Connection, payload: dict) -> None:
+    try:
+        ts = payload.get("timestamp") or int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?)",
+            (
+                ts,
+                payload.get("indoor_temp_f"),
+                payload.get("outdoor_temp_f"),
+                payload.get("indoor_humidity_pct"),
+                payload.get("outdoor_humidity_pct"),
+                payload.get("ac_current_a"),
+                payload.get("dehum_current_a"),
+            ),
+        )
+        cutoff = ts - HISTORY_RETAIN_DAYS * 86400
+        conn.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
+        conn.commit()
+    except Exception as exc:
+        log.warning("History write failed: %s", exc)
+
 
 # ──────────────────────────────────────────────────────────────
 # RS485 MODBUS — SHT30 TEMPERATURE / HUMIDITY SENSORS
@@ -789,6 +844,10 @@ def run() -> None:
     else:
         log.warning("pymodbus not available — RS485 sensor reads disabled")
 
+    # ── History DB ─────────────────────────────────────────────
+    history_db: Optional[sqlite3.Connection] = _open_history_db()
+    _last_history_write: float = 0.0
+
     # ── MQTT client ────────────────────────────────────────────
     mqtt_client = mqtt.Client(client_id="hvac-bridge", clean_session=True)
     mqtt_client.reconnect_delay_set(min_delay=2, max_delay=60)
@@ -1005,6 +1064,11 @@ def run() -> None:
             _tmp.replace(Path("/tmp/hvac_status.json"))
         except Exception as exc:
             log.debug("Status cache write failed: %s", exc)
+
+        # ── History write (every 60 s) ─────────────────────────
+        if history_db and (loop_start - _last_history_write) >= HISTORY_WRITE_INTERVAL_S:
+            _write_history(history_db, payload)
+            _last_history_write = loop_start
 
         # ── Publish MQTT status ────────────────────────────────────
         # Status goes to the cloud broker (HiveMQ) for Snowflake ingestion.

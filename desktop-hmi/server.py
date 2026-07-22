@@ -787,6 +787,67 @@ async def api_status():
     return JSONResponse(snap)
 
 
+@app.get("/api/history")
+async def api_history(period: str = "day"):
+    db_path = Path("/home/arduino/hvac-controller/data/history.db")
+    if not db_path.exists():
+        return JSONResponse({"period": period, "rows": []})
+
+    now = int(time.time())
+    if period == "week":
+        since  = now - 7 * 86400
+        bucket = 300      # 5-min averages → ≤2016 points
+    elif period == "month":
+        since  = now - 32 * 86400
+        bucket = 900      # 15-min averages → ≤3072 points
+    else:                 # day (default)
+        since  = now - 86400
+        bucket = None     # raw 1-min rows → ≤1440 points
+
+    import sqlite3 as _sqlite3
+
+    def _query():
+        conn = _sqlite3.connect(str(db_path))
+        conn.row_factory = _sqlite3.Row
+        try:
+            if bucket:
+                sql = f"""
+                    SELECT
+                        (ts / {bucket}) * {bucket}  AS t,
+                        AVG(indoor_temp_f)           AS indoor_temp_f,
+                        AVG(outdoor_temp_f)          AS outdoor_temp_f,
+                        AVG(indoor_humidity_pct)     AS indoor_humidity_pct,
+                        AVG(outdoor_humidity_pct)    AS outdoor_humidity_pct,
+                        AVG(ac_current_a)            AS ac_current_a,
+                        AVG(dehum_current_a)         AS dehum_current_a
+                    FROM history
+                    WHERE ts >= {since}
+                    GROUP BY (ts / {bucket})
+                    ORDER BY t
+                """
+            else:
+                sql = f"""
+                    SELECT ts AS t,
+                        indoor_temp_f, outdoor_temp_f,
+                        indoor_humidity_pct, outdoor_humidity_pct,
+                        ac_current_a, dehum_current_a
+                    FROM history
+                    WHERE ts >= {since}
+                    ORDER BY ts
+                """
+            rows = conn.execute(sql).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    try:
+        rows = await asyncio.get_event_loop().run_in_executor(None, _query)
+        return JSONResponse({"period": period, "rows": rows})
+    except Exception as exc:
+        log.error("History query failed: %s", exc)
+        raise HTTPException(500, str(exc))
+
+
 @app.get("/api/metadata")
 async def api_metadata():
     return {

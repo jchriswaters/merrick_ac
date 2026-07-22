@@ -440,6 +440,137 @@
   }
 
   // ────────────────────────────────────────────────
+  // Tab switching
+  // ────────────────────────────────────────────────
+
+  let activeTab = "dashboard";
+
+  function switchTab(tab) {
+    activeTab = tab;
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === tab);
+    });
+    $("view-dashboard").hidden = tab !== "dashboard";
+    $("view-history").hidden   = tab !== "history";
+    if (tab === "history") loadHistory(activePeriod);
+  }
+
+  // ────────────────────────────────────────────────
+  // History charts
+  // ────────────────────────────────────────────────
+
+  let activePeriod = "day";
+  const charts = {};   // keyed by chart id
+
+  const CHART_DEFAULTS = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {
+      legend: {
+        labels: { color: "#8b949e", boxWidth: 14, padding: 16, font: { size: 12 } },
+      },
+      tooltip: {
+        mode: "index", intersect: false,
+        backgroundColor: "#161b22",
+        borderColor: "#30363d", borderWidth: 1,
+        titleColor: "#e6edf3", bodyColor: "#8b949e",
+        callbacks: {
+          title: (items) => {
+            const ts = items[0]?.parsed?.x;
+            return ts ? new Date(ts).toLocaleString() : "";
+          },
+        },
+      },
+    },
+    scales: {
+      x: {
+        type: "time",
+        time: { tooltipFormat: "MMM d HH:mm" },
+        ticks: { color: "#6e7681", maxTicksLimit: 8, maxRotation: 0 },
+        grid: { color: "rgba(48,54,61,0.6)" },
+      },
+      y: {
+        ticks: { color: "#6e7681" },
+        grid: { color: "rgba(48,54,61,0.6)" },
+      },
+    },
+  };
+
+  function makeDataset(label, color, data) {
+    return {
+      label,
+      data,
+      borderColor: color,
+      backgroundColor: color + "22",
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.3,
+      fill: false,
+    };
+  }
+
+  function rowsToXY(rows, field) {
+    return rows
+      .filter((r) => r[field] != null)
+      .map((r) => ({ x: r.t * 1000, y: +r[field].toFixed(2) }));
+  }
+
+  function initChart(canvasId, datasets, yLabel) {
+    const canvas = $(canvasId);
+    if (!canvas) return;
+    if (charts[canvasId]) {
+      charts[canvasId].destroy();
+      delete charts[canvasId];
+    }
+    const cfg = JSON.parse(JSON.stringify(CHART_DEFAULTS));
+    cfg.scales.y.title = { display: true, text: yLabel, color: "#6e7681", font: { size: 11 } };
+    charts[canvasId] = new Chart(canvas, { type: "line", data: { datasets }, options: cfg });
+  }
+
+  async function loadHistory(period) {
+    const view = $("view-history");
+    view.setAttribute("data-loading", "1");
+    try {
+      const resp = await fetch(`/api/history?period=${period}`);
+      const json = await resp.json();
+      const rows = json.rows || [];
+      view.removeAttribute("data-loading");
+
+      initChart("chart-temp", [
+        makeDataset("Indoor °F",  "#58a6ff", rowsToXY(rows, "indoor_temp_f")),
+        makeDataset("Outdoor °F", "#ff7b72", rowsToXY(rows, "outdoor_temp_f")),
+      ], "°F");
+
+      initChart("chart-hum", [
+        makeDataset("Indoor %RH",  "#3fb950", rowsToXY(rows, "indoor_humidity_pct")),
+        makeDataset("Outdoor %RH", "#d29922", rowsToXY(rows, "outdoor_humidity_pct")),
+      ], "%RH");
+
+      initChart("chart-current", [
+        makeDataset("AC (A)",    "#58a6ff", rowsToXY(rows, "ac_current_a")),
+        makeDataset("Dehum (A)", "#bc8cff", rowsToXY(rows, "dehum_current_a")),
+      ], "Amps");
+
+      if (rows.length === 0) {
+        ["chart-temp","chart-hum","chart-current"].forEach((id) => {
+          const c = $(id);
+          if (c) {
+            const ctx = c.getContext("2d");
+            ctx.fillStyle = "#6e7681";
+            ctx.font = "14px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("No history data yet — logging starts automatically.", c.width / 2, c.height / 2);
+          }
+        });
+      }
+    } catch (e) {
+      console.error("History fetch failed", e);
+      view.removeAttribute("data-loading");
+    }
+  }
+
+  // ────────────────────────────────────────────────
   // Bootstrap
   // ────────────────────────────────────────────────
 
@@ -476,6 +607,21 @@
   }
 
   document.addEventListener("DOMContentLoaded", async () => {
+    // Tab bar
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    });
+
+    // Period buttons
+    document.querySelectorAll(".period-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".period-btn").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        activePeriod = btn.dataset.period;
+        loadHistory(activePeriod);
+      });
+    });
+
     $("sim-clear-btn").addEventListener("click", clearAllOverrides);
 
     // Numpad key events

@@ -576,6 +576,96 @@ html, body {
 .numpad-ok:active { filter: brightness(0.9); }
 .numpad-ok:disabled { background: var(--border-light); color: var(--text-faint); cursor: not-allowed; }
 
+/* ──────────── Tab bar ──────────── */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 10px 24px 0;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 22px 9px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  letter-spacing: 0.04em;
+  min-height: 44px;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ──────────── History view ──────────── */
+.history-controls {
+  display: flex;
+  gap: 8px;
+  padding: 20px 24px 0;
+}
+.period-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 26px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.12s;
+  min-height: 44px;
+}
+.period-btn:hover { color: var(--text); border-color: var(--accent); }
+.period-btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+}
+
+.charts-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 24px 24px;
+}
+.chart-panel {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow);
+}
+.chart-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+.chart-wrap {
+  position: relative;
+  height: 200px;
+}
+.chart-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+#view-history[data-loading]::after {
+  content: "Loading…";
+  display: block;
+  text-align: center;
+  color: var(--text-faint);
+  padding: 48px;
+  font-size: 14px;
+}
+
 /* ──────────── Footer ──────────── */
 .footer {
   display: flex;

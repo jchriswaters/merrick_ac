@@ -19,6 +19,12 @@
     </div>
   </header>
 
+  <nav class="tab-bar">
+    <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="tab-btn" data-tab="history">History</button>
+  </nav>
+
+  <div id="view-dashboard">
   <div class="sim-banner" id="sim-banner" hidden>
     <span class="sim-banner-icon">⚠</span>
     <span id="sim-banner-text">Simulation mode active</span>
@@ -91,6 +97,29 @@
       Phase 1 — read-only.  Input simulation coming in Phase 2.
     </span>
   </footer>
+  </div><!-- #view-dashboard -->
+
+  <div id="view-history" hidden>
+    <div class="history-controls">
+      <button class="period-btn active" data-period="day">Day</button>
+      <button class="period-btn" data-period="week">Week</button>
+      <button class="period-btn" data-period="month">Month</button>
+    </div>
+    <div class="charts-grid">
+      <div class="chart-panel">
+        <div class="chart-title">Temperature (°F)</div>
+        <div class="chart-wrap"><canvas id="chart-temp"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <div class="chart-title">Humidity (%RH)</div>
+        <div class="chart-wrap"><canvas id="chart-hum"></canvas></div>
+      </div>
+      <div class="chart-panel">
+        <div class="chart-title">Current (A)</div>
+        <div class="chart-wrap"><canvas id="chart-current"></canvas></div>
+      </div>
+    </div>
+  </div><!-- #view-history -->
 
   <!-- Numeric keypad modal -->
   <div class="numpad-overlay" id="numpad-overlay" hidden>
@@ -118,6 +147,7 @@
     </div>
   </div>
 
+  <script src="/static/chart.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
