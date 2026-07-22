@@ -440,6 +440,61 @@
   }
 
   // ────────────────────────────────────────────────
+  // Screensaver
+  // ────────────────────────────────────────────────
+
+  const SS_TIMEOUT_MS = 10 * 60 * 1000;  // 10 minutes
+  let ssTimer = null;
+  let ssDrifting = null;
+
+  function ssShow() {
+    const ss = $("screensaver");
+    ss.hidden = false;
+    updateSsClock();
+    startSsDrift();
+  }
+
+  function ssDismiss() {
+    $("screensaver").hidden = true;
+    stopSsDrift();
+    resetSsTimer();
+  }
+
+  function resetSsTimer() {
+    clearTimeout(ssTimer);
+    ssTimer = setTimeout(ssShow, SS_TIMEOUT_MS);
+  }
+
+  function updateSsClock() {
+    const ss = $("screensaver");
+    if (ss.hidden) return;
+    const now = new Date();
+    $("ss-time").textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    $("ss-date").textContent = now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    setTimeout(updateSsClock, 1000);
+  }
+
+  function startSsDrift() {
+    const content = $("ss-content");
+    function drift() {
+      // Keep the content within the middle 60% of the screen to stay readable
+      const maxX = Math.floor(window.innerWidth  * 0.6);
+      const maxY = Math.floor(window.innerHeight * 0.6);
+      const x = Math.floor(window.innerWidth  * 0.2 + Math.random() * maxX);
+      const y = Math.floor(window.innerHeight * 0.2 + Math.random() * maxY);
+      content.style.left = x + "px";
+      content.style.top  = y + "px";
+      content.style.transform = "translate(-50%, -50%)";
+      ssDrifting = setTimeout(drift, 20000);
+    }
+    drift();
+  }
+
+  function stopSsDrift() {
+    clearTimeout(ssDrifting);
+  }
+
+  // ────────────────────────────────────────────────
   // Tab switching
   // ────────────────────────────────────────────────
 
@@ -462,40 +517,66 @@
   let activePeriod = "day";
   const charts = {};   // keyed by chart id
 
-  const CHART_DEFAULTS = {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    plugins: {
-      legend: {
-        labels: { color: "#8b949e", boxWidth: 14, padding: 16, font: { size: 12 } },
-      },
-      tooltip: {
-        mode: "index", intersect: false,
-        backgroundColor: "#161b22",
-        borderColor: "#30363d", borderWidth: 1,
-        titleColor: "#e6edf3", bodyColor: "#8b949e",
-        callbacks: {
-          title: (items) => {
-            const ts = items[0]?.parsed?.x;
-            return ts ? new Date(ts).toLocaleString() : "";
+  function fmtAxisTick(ms, period) {
+    const d = new Date(ms);
+    if (period === "day") {
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } else if (period === "week") {
+      // Show weekday at midnight, time otherwise
+      return d.getHours() === 0 && d.getMinutes() < 30
+        ? d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
+        : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } else {
+      return d.toLocaleDateString([], { month: "short", day: "numeric" });
+    }
+  }
+
+  function buildOptions(minX, maxX, yLabel, period) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: {
+          labels: { color: "#8b949e", boxWidth: 14, padding: 16, font: { size: 12 } },
+        },
+        tooltip: {
+          mode: "index", intersect: false,
+          backgroundColor: "#161b22",
+          borderColor: "#30363d", borderWidth: 1,
+          titleColor: "#e6edf3", bodyColor: "#8b949e",
+          callbacks: {
+            title: (items) => {
+              const ms = items[0]?.parsed?.x;
+              if (!ms) return "";
+              const d = new Date(ms);
+              return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })
+                + "  " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+            },
           },
         },
       },
-    },
-    scales: {
-      x: {
-        type: "time",
-        time: { tooltipFormat: "MMM d HH:mm" },
-        ticks: { color: "#6e7681", maxTicksLimit: 8, maxRotation: 0 },
-        grid: { color: "rgba(48,54,61,0.6)" },
+      scales: {
+        x: {
+          type: "linear",
+          min: minX,
+          max: maxX,
+          ticks: {
+            color: "#6e7681",
+            maxTicksLimit: 8,
+            maxRotation: 0,
+            callback: (v) => fmtAxisTick(v, period),
+          },
+          grid: { color: "rgba(48,54,61,0.6)" },
+        },
+        y: {
+          title: { display: true, text: yLabel, color: "#6e7681", font: { size: 11 } },
+          ticks: { color: "#6e7681" },
+          grid: { color: "rgba(48,54,61,0.6)" },
+        },
       },
-      y: {
-        ticks: { color: "#6e7681" },
-        grid: { color: "rgba(48,54,61,0.6)" },
-      },
-    },
-  };
+    };
+  }
 
   function makeDataset(label, color, data) {
     return {
@@ -516,16 +597,15 @@
       .map((r) => ({ x: r.t * 1000, y: +r[field].toFixed(2) }));
   }
 
-  function initChart(canvasId, datasets, yLabel) {
+  function initChart(canvasId, datasets, yLabel, minX, maxX, period) {
     const canvas = $(canvasId);
     if (!canvas) return;
-    if (charts[canvasId]) {
-      charts[canvasId].destroy();
-      delete charts[canvasId];
-    }
-    const cfg = JSON.parse(JSON.stringify(CHART_DEFAULTS));
-    cfg.scales.y.title = { display: true, text: yLabel, color: "#6e7681", font: { size: 11 } };
-    charts[canvasId] = new Chart(canvas, { type: "line", data: { datasets }, options: cfg });
+    if (charts[canvasId]) { charts[canvasId].destroy(); delete charts[canvasId]; }
+    charts[canvasId] = new Chart(canvas, {
+      type: "line",
+      data: { datasets },
+      options: buildOptions(minX, maxX, yLabel, period),
+    });
   }
 
   async function loadHistory(period) {
@@ -537,33 +617,27 @@
       const rows = json.rows || [];
       view.removeAttribute("data-loading");
 
+      // Shared x-axis bounds across all three charts
+      const now = Date.now();
+      const spans = { day: 86400e3, week: 7 * 86400e3, month: 32 * 86400e3 };
+      const minX = rows.length ? rows[0].t * 1000 : now - spans[period];
+      const maxX = rows.length ? rows[rows.length - 1].t * 1000 : now;
+
       initChart("chart-temp", [
-        makeDataset("Indoor °F",  "#58a6ff", rowsToXY(rows, "indoor_temp_f")),
-        makeDataset("Outdoor °F", "#ff7b72", rowsToXY(rows, "outdoor_temp_f")),
-      ], "°F");
+        makeDataset("Indoor °F",   "#58a6ff", rowsToXY(rows, "indoor_temp_f")),
+        makeDataset("Outdoor °F",  "#ff7b72", rowsToXY(rows, "outdoor_temp_f")),
+      ], "°F", minX, maxX, period);
 
       initChart("chart-hum", [
         makeDataset("Indoor %RH",  "#3fb950", rowsToXY(rows, "indoor_humidity_pct")),
         makeDataset("Outdoor %RH", "#d29922", rowsToXY(rows, "outdoor_humidity_pct")),
-      ], "%RH");
+      ], "%RH", minX, maxX, period);
 
       initChart("chart-current", [
-        makeDataset("AC (A)",    "#58a6ff", rowsToXY(rows, "ac_current_a")),
-        makeDataset("Dehum (A)", "#bc8cff", rowsToXY(rows, "dehum_current_a")),
-      ], "Amps");
+        makeDataset("AC (A)",      "#58a6ff", rowsToXY(rows, "ac_current_a")),
+        makeDataset("Dehum (A)",   "#bc8cff", rowsToXY(rows, "dehum_current_a")),
+      ], "Amps", minX, maxX, period);
 
-      if (rows.length === 0) {
-        ["chart-temp","chart-hum","chart-current"].forEach((id) => {
-          const c = $(id);
-          if (c) {
-            const ctx = c.getContext("2d");
-            ctx.fillStyle = "#6e7681";
-            ctx.font = "14px sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText("No history data yet — logging starts automatically.", c.width / 2, c.height / 2);
-          }
-        });
-      }
     } catch (e) {
       console.error("History fetch failed", e);
       view.removeAttribute("data-loading");
@@ -607,6 +681,15 @@
   }
 
   document.addEventListener("DOMContentLoaded", async () => {
+    // Screensaver — wake on any touch or click
+    $("screensaver").addEventListener("touchstart", (e) => { e.preventDefault(); ssDismiss(); }, { passive: false });
+    $("screensaver").addEventListener("mousedown",  () => ssDismiss());
+    // Reset idle timer on any interaction with the main UI
+    ["touchstart", "mousedown", "keydown"].forEach((ev) =>
+      document.addEventListener(ev, () => { if (!$("screensaver").hidden) return; resetSsTimer(); }, { passive: true })
+    );
+    resetSsTimer();  // start the 10-minute countdown
+
     // Tab bar
     document.querySelectorAll(".tab-btn").forEach((btn) => {
       btn.addEventListener("click", () => switchTab(btn.dataset.tab));

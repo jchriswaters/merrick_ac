@@ -666,6 +666,44 @@ html, body {
   font-size: 14px;
 }
 
+/* ──────────── Screensaver ──────────── */
+#screensaver {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  z-index: 500;
+  cursor: none;
+  touch-action: none;
+}
+#screensaver[hidden] { display: none; }
+.ss-content {
+  position: absolute;
+  text-align: center;
+  user-select: none;
+  transition: top 20s ease-in-out, left 20s ease-in-out;
+}
+.ss-time {
+  font-size: 80px;
+  font-weight: 200;
+  color: #2a2a2a;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+.ss-date {
+  font-size: 18px;
+  color: #1e1e1e;
+  margin-top: 6px;
+  letter-spacing: 0.08em;
+}
+.ss-brand {
+  font-size: 11px;
+  color: #181818;
+  margin-top: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.35em;
+}
+
 /* ──────────── Footer ──────────── */
 .footer {
   display: flex;
