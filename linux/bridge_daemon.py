@@ -84,6 +84,7 @@ HISTORY_RETAIN_DAYS     = 32     # purge rows older than this
 MQTT_STATUS  = "home/hvac/status"
 MQTT_CONFIG  = "home/hvac/config"
 MQTT_CMD     = "home/hvac/cmd"
+MQTT_NCD_CURRENT = "jchriswaters_current_sensor"   # NCD WiFi CT clamp on house main
 
 # Modbus slave addresses
 ADDR_SHT30_INDOOR  = 0x01   # RS485 SHT30 — indoor, return-air location
@@ -176,6 +177,33 @@ SETCONFIG_SCHEMA: dict = {
 log = logging.getLogger("hvac")
 
 # ──────────────────────────────────────────────────────────────
+# NCD CURRENT SENSOR — shared state updated by MQTT callback
+# ──────────────────────────────────────────────────────────────
+
+_ncd_lock = threading.Lock()
+_ncd_current_a: Optional[float] = None   # latest house-main RMS current (A)
+_ncd_last_ts:   float = 0.0              # monotonic time of last received message
+
+
+def _handle_ncd_message(payload_str: str) -> None:
+    """Parse an NCD CT-clamp payload and update the shared current reading."""
+    global _ncd_current_a, _ncd_last_ts
+    try:
+        data = json.loads(payload_str)
+        rms_ma = data.get("rms_current_ma")
+        if rms_ma is None:
+            log.warning("NCD payload missing rms_current_ma: %s", payload_str[:120])
+            return
+        amps = round(float(rms_ma) / 1000.0, 2)
+        with _ncd_lock:
+            _ncd_current_a = amps
+            _ncd_last_ts   = time.monotonic()
+        log.debug("NCD current: %.2f A", amps)
+    except Exception as exc:
+        log.warning("NCD payload parse error: %s — %s", exc, payload_str[:120])
+
+
+# ──────────────────────────────────────────────────────────────
 # CONFIG PERSISTENCE
 # ──────────────────────────────────────────────────────────────
 
@@ -218,7 +246,8 @@ def _open_history_db() -> Optional[sqlite3.Connection]:
                 indoor_humidity_pct   REAL,
                 outdoor_humidity_pct  REAL,
                 ac_current_a          REAL,
-                dehum_current_a       REAL
+                dehum_current_a       REAL,
+                main_current_a        REAL
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON history(ts)")
@@ -234,7 +263,7 @@ def _write_history(conn: sqlite3.Connection, payload: dict) -> None:
     try:
         ts = payload.get("timestamp") or int(time.time())
         conn.execute(
-            "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO history VALUES (?,?,?,?,?,?,?,?)",
             (
                 ts,
                 payload.get("indoor_temp_f"),
@@ -243,6 +272,7 @@ def _write_history(conn: sqlite3.Connection, payload: dict) -> None:
                 payload.get("outdoor_humidity_pct"),
                 payload.get("ac_current_a"),
                 payload.get("dehum_current_a"),
+                payload.get("main_current_a"),
             ),
         )
         cutoff = ts - HISTORY_RETAIN_DAYS * 86400
@@ -859,6 +889,8 @@ def run() -> None:
         if rc == 0:
             log.info("MQTT connected to %s:%d", cfg["mqtt_host"], cfg["mqtt_port"])
             client.subscribe(MQTT_CMD, qos=1)
+            client.subscribe(MQTT_NCD_CURRENT, qos=0)
+            log.info("Subscribed to NCD current topic: %s", MQTT_NCD_CURRENT)
             # Publish current config immediately so HMI and HA have it on reconnect
             with cfg_lock:
                 client.publish(MQTT_CONFIG, json.dumps(build_config_payload(cfg)),
@@ -873,6 +905,9 @@ def run() -> None:
     def on_message(client, userdata, msg):
         nonlocal cfg
         payload_str = msg.payload.decode(errors="replace")
+        if msg.topic == MQTT_NCD_CURRENT:
+            _handle_ncd_message(payload_str)
+            return
         log.info("CMD  ← %s", payload_str[:200])
         with cfg_lock:
             cfg = handle_command(cfg, client, payload_str)
@@ -1055,6 +1090,12 @@ def run() -> None:
         payload["mode"]         = derive_mode(payload)
         payload["compressor_on"] = bool(payload.get("low_cool")) or bool(payload.get("high_cool"))
         payload["timestamp"]    = int(time.time())
+
+        # ── NCD house-main current ─────────────────────────────
+        with _ncd_lock:
+            payload["main_current_a"]  = _ncd_current_a
+            ncd_age = time.monotonic() - _ncd_last_ts if _ncd_last_ts else None
+        payload["main_current_stale"] = ncd_age is None or ncd_age > 120
 
         # ── Write status cache for web_config.py ───────────────
         # web_config.py reads /tmp/hvac_status.json for the /api/status endpoint

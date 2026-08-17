@@ -678,6 +678,8 @@ async def collect_status(session: ControllerSession) -> dict:
             "ac_power_w":            mqtt.get("ac_power_w"),
             "ac_energy_kwh":         mqtt.get("ac_energy_kwh"),
             "dehum_power_w":         mqtt.get("dehum_power_w"),
+            "main_current_a":        mqtt.get("main_current_a"),
+            "main_current_stale":    mqtt.get("main_current_stale", True),
         }
         # mode + compressor_on are now derived live from the RPC outputs
         # above (snappier than the 10 s MQTT cycle).  Fall back to MQTT
@@ -819,7 +821,8 @@ async def api_history(period: str = "day"):
                         AVG(indoor_humidity_pct)     AS indoor_humidity_pct,
                         AVG(outdoor_humidity_pct)    AS outdoor_humidity_pct,
                         AVG(ac_current_a)            AS ac_current_a,
-                        AVG(dehum_current_a)         AS dehum_current_a
+                        AVG(dehum_current_a)         AS dehum_current_a,
+                        AVG(main_current_a)          AS main_current_a
                     FROM history
                     WHERE ts >= {since}
                     GROUP BY (ts / {bucket})
@@ -830,7 +833,7 @@ async def api_history(period: str = "day"):
                     SELECT ts AS t,
                         indoor_temp_f, outdoor_temp_f,
                         indoor_humidity_pct, outdoor_humidity_pct,
-                        ac_current_a, dehum_current_a
+                        ac_current_a, dehum_current_a, main_current_a
                     FROM history
                     WHERE ts >= {since}
                     ORDER BY ts

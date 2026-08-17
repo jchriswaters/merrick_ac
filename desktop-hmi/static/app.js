@@ -327,6 +327,7 @@
     $("ac-power").textContent      = s.ac_power_w   != null ? fmt(s.ac_power_w, 0) : "—";
     $("ac-current").textContent    = s.ac_current_a != null ? fmt(s.ac_current_a, 1) : "—";
     $("ac-voltage").textContent    = s.ac_voltage_v != null ? fmt(s.ac_voltage_v, 0) : "—";
+    $("main-current").textContent  = s.main_current_a != null ? fmt(s.main_current_a, 1) : "—";
 
     // Staleness: compare the MQTT message timestamp to the server poll time.
     // Using both server-side values avoids client-clock skew.
@@ -337,6 +338,7 @@
     ["card-indoor", "card-outdoor", "card-power"].forEach((id) => {
       $(id).classList.toggle("stale", stale);
     });
+    $("card-main-current").classList.toggle("stale", !!s.main_current_stale);
   }
 
   function applySnapshot(snap) {
@@ -634,8 +636,9 @@
       ], "%RH", minX, maxX, period);
 
       initChart("chart-current", [
-        makeDataset("AC (A)",      "#58a6ff", rowsToXY(rows, "ac_current_a")),
-        makeDataset("Dehum (A)",   "#bc8cff", rowsToXY(rows, "dehum_current_a")),
+        makeDataset("House Main (A)", "#f0883e", rowsToXY(rows, "main_current_a")),
+        makeDataset("AC (A)",         "#58a6ff", rowsToXY(rows, "ac_current_a")),
+        makeDataset("Dehum (A)",      "#bc8cff", rowsToXY(rows, "dehum_current_a")),
       ], "Amps", minX, maxX, period);
 
     } catch (e) {
