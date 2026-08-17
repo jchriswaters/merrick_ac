@@ -324,10 +324,8 @@
     $("indoor-hum").textContent   = s.indoor_humidity_pct != null ? fmt(s.indoor_humidity_pct, 0) : "—";
     $("outdoor-temp").textContent = fmt(s.outdoor_temp_f);
     $("outdoor-hum").textContent  = s.outdoor_humidity_pct != null ? fmt(s.outdoor_humidity_pct, 0) : "—";
-    $("ac-power").textContent      = s.ac_power_w   != null ? fmt(s.ac_power_w, 0) : "—";
-    $("ac-current").textContent    = s.ac_current_a != null ? fmt(s.ac_current_a, 1) : "—";
-    $("ac-voltage").textContent    = s.ac_voltage_v != null ? fmt(s.ac_voltage_v, 0) : "—";
     $("main-current").textContent  = s.main_current_a != null ? fmt(s.main_current_a, 1) : "—";
+    $("main-kw").textContent       = s.main_current_a != null ? fmt(s.main_current_a * 230 / 1000, 1) : "—";
 
     // Staleness: compare the MQTT message timestamp to the server poll time.
     // Using both server-side values avoids client-clock skew.
@@ -335,7 +333,7 @@
     if (snap.sensors && snap.mqtt_ts && snap.ts) {
       stale = (snap.ts - snap.mqtt_ts) > STALE_SECONDS;
     }
-    ["card-indoor", "card-outdoor", "card-power"].forEach((id) => {
+    ["card-indoor", "card-outdoor"].forEach((id) => {
       $(id).classList.toggle("stale", stale);
     });
     $("card-main-current").classList.toggle("stale", !!s.main_current_stale);

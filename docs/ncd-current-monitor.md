@@ -67,33 +67,31 @@ software download needed.
 
 | Parameter | Configured value for this installation |
 |-----------|----------------------------------------|
-| Broker | `broker.hivemq.com` port `1883` |
-| Topic | `jchriswaters_merrick_ac_current` *(suggested — confirm in web UI)* |
-| Auth | None (HiveMQ public broker) |
-| TLS | Optional (HiveMQ public supports TLS on port 8883) |
+| Broker | Local mosquitto on controller (`192.168.1.197:1883`) |
+| Topic | `jchriswaters_current_sensor` |
+| Auth | None (anonymous allowed on LAN listener) |
+| TLS | Disabled |
 | Payload format | JSON |
+| Device IP | `192.168.1.244` (DHCP — pin via router reservation if needed) |
 
-**Published payload format** (NCD standard — confirm field names against
-live output from your unit):
+**Published payload format** (confirmed from live unit):
 
 ```json
 {
-  "nodeId": "ncd-1ec4",
-  "firmware": "1.0.x",
-  "ct1_amps": 12.34,
-  "timestamp": 1234567890
+  "transmission_count": 12345,
+  "rms_current_ma": 24160
 }
 ```
 
-> **Note:** NCD does not publicly document the exact JSON field names for this
-> model. Capture a live payload using `mosquitto_sub` (see below) to confirm
-> field names before writing any downstream parsing logic.
+- `rms_current_ma` — RMS current in **milliamps**; divide by 1000 for amps.
+- `transmission_count` — monotonically increasing counter; can be used to detect missed messages.
+- The device publishes every few seconds (change-detection threshold also applies).
 
 **Capture a live payload:**
 
 ```bash
-mosquitto_sub -h broker.hivemq.com -p 1883 \
-  -t "jchriswaters_merrick_ac_current" -v
+ssh arduino@192.168.1.197
+mosquitto_sub -h localhost -t "jchriswaters_current_sensor" -v
 ```
 
 ---
@@ -107,28 +105,27 @@ under 1A at 12V. The CT clamp attaches directly to the monitored conductor
 
 ---
 
-## Integration with the Snowflake pipeline
+## Integration with bridge_daemon
 
-The NCD sensor publishes **independently** to HiveMQ — the bridge_daemon
-does not poll it. To capture its readings in Snowflake:
+The NCD sensor publishes to local mosquitto; `bridge_daemon.py` subscribes and
+incorporates the reading into every status payload and history DB write.
 
-1. Add its topic to `config.env` in the `mqtt-to-snowflake` repo:
-   ```
-   MQTT_TOPICS=jchriswaters_merrick_ac,jchriswaters_merrick_ac_current
-   ```
-2. Redeploy the service (topics are baked into the systemd unit):
-   ```bash
-   bash deploy.sh --generate
-   bash deploy.sh --install
-   sudo systemctl restart mqtt_snowflake
-   ```
-3. Verify subscription in logs:
-   ```bash
-   sudo journalctl -u mqtt_snowflake -f | grep -i subscrib
-   ```
+**bridge_daemon behaviour:**
 
-Records will appear in `DBTL.MQTT.MQTT_DATA_RAW` with
-`MESSAGE_TYPE = 'jchriswaters_merrick_ac_current'`.
+- Subscribes to `jchriswaters_current_sensor` on startup (alongside the command topic).
+- Parses `rms_current_ma` and converts to amps (÷ 1000) → `main_current_a`.
+- Marks `main_current_stale = True` if no message received within 120 s.
+- Writes `main_current_a` to the SQLite history DB (`/home/arduino/hvac-controller/data/history.db`) every 20 s alongside temp/humidity.
+
+**Derived value — House Main kW:**
+
+The HMI dashboard card derives total power from current using a fixed 230V assumption:
+
+```
+kW = main_current_a × 230 / 1000
+```
+
+This is displayed alongside the raw amp reading on the "House Main" hero card.
 
 ---
 
@@ -140,7 +137,7 @@ Records will appear in `DBTL.MQTT.MQTT_DATA_RAW` with
 | Measurements | RMS current (A) | V, A, W, VA, PF, Hz, kWh |
 | Non-invasive install | Yes (CT clamp) | Yes (CT clamp variant) |
 | Configuration | Web browser | Front-panel buttons |
-| Data path | MQTT → HiveMQ → Snowflake | bridge_daemon poll → MQTT |
+| Data path | MQTT → local mosquitto → bridge_daemon | bridge_daemon poll → MQTT |
 | IP rating | IP65 | IP20 (DIN-rail, indoor) |
 | Power supply | 6–32V DC (self-contained) | 80–270VAC (from monitored circuit) |
 

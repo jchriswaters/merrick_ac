@@ -5,7 +5,7 @@ and the "why" behind non-obvious decisions.  Keep it short — detailed
 material lives in the other docs (linked below).  Update the "Current
 status" and "Open items" sections at the end of each work session.
 
-Last updated: 2026-07-20
+Last updated: 2026-08-16
 
 ---
 
@@ -39,7 +39,7 @@ codebase or pasting a transcript.
 
 ---
 
-## Current status (2026-07-18)
+## Current status (2026-08-16)
 
 **Working:**
 - MCU sketch runs; RPC methods `get_outputs` / `get_inputs` / `set_flags` /
@@ -145,14 +145,34 @@ codebase or pasting a transcript.
   state ("MCU unresponsive") distinct from the red "controller unreachable"
   state.
 
-**Pending / not yet verified:**
-- **NCD WiFi AC Current Monitor** — ordered/installed but not yet integrated
-  into the data pipeline.  Web config at `http://ncd-1ec4.local/`; configure
-  to publish JSON to `broker.hivemq.com:1883` on a dedicated topic (e.g.
-  `jchriswaters_merrick_ac_current`).  See `docs/component-list.md` §WiFi
-  Current Monitoring for full specs and wiring notes.
+- **NCD WiFi AC Current Monitor** — DONE. Device (`192.168.1.244`) configured
+  to publish `{"transmission_count": N, "rms_current_ma": NNNNN}` to local
+  mosquitto (`192.168.1.197:1883`) on topic `jchriswaters_current_sensor`.
+  bridge_daemon subscribes, converts mA→A, writes `main_current_a` to status
+  payload and history DB every 20 s.  Stale flag raised after 120 s silence.
+  NCD firmware only reads broker config at boot — **power cycle required after
+  changing MQTT settings in the web UI** (save alone is not enough).
+  See `docs/ncd-current-monitor.md`.
+- **Time-series history logging** — DONE.  SQLite DB at
+  `/home/arduino/hvac-controller/data/history.db` — one row per 20 s, 32-day
+  ring buffer.  Columns: `ts`, `indoor_temp_f`, `outdoor_temp_f`,
+  `indoor_humidity_pct`, `outdoor_humidity_pct`, `ac_current_a`,
+  `dehum_current_a`, `main_current_a`.  Persists across restarts.
+- **History monitoring charts** — DONE.  History tab in HMI shows Temperature,
+  Humidity, and Current charts (Chart.js 4.4.4 bundled locally, no CDN).
+  Day / Week / Month period selector.  All charts share the same x-axis time
+  bounds.  Linear scale with formatted timestamp ticks (no date adapter needed).
+- **10-minute screensaver** — DONE.  Black overlay with drifting clock (prevents
+  burn-in).  Dismissed on any touch or mouse event.  Timer resets on activity.
+- **House Main hero card** — shows live amps + derived kW (`A × 230 / 1000`).
+  Stale badge displayed when NCD data is >120 s old.
+- **Controller timezone** — set to `America/Chicago` (CDT −0500, synced via NTP).
+- **SSH key auth** — set up 2026-08-16; no password needed for `scp`/`ssh`
+  from dev machine to `arduino@192.168.1.197`.
+
+**Pending / not yet started:**
 - SDM120 AC meter (0x03) — needs L/N wired to live AC + address set; not
-  yet returning data.
+  yet returning data.  AC Power hero card removed from HMI until wired.
 - SDM120 dehumidifier meter (0x04) — same.
 - `web_config.py` Flask config API — present in repo, superseded by the
   HMI settings panel; not re-verified and likely unused.
@@ -160,6 +180,10 @@ codebase or pasting a transcript.
 - RS485 auto-reconnect **verified** through a real USB host-role drop event
   (2026-07-18): sensors recovered automatically within one poll cycle once
   `/dev/ttyUSB0` reappeared after the role was restored.
+- **Room tablets / wall panels** — concept discussed: replace wall thermostats
+  with WiFi tablets (phone-sized or small Android) running HMI in kiosk mode,
+  plus per-room WiFi temp/humidity sensors (ESP32 + SHT31) publishing to
+  local mosquitto.  No implementation started.
 
 ---
 
@@ -269,12 +293,13 @@ sim/         offline simulator + sensor bench tools
 
 ## Open questions / future work
 
-- **NCD WiFi current monitor** — configure via `http://ncd-1ec4.local/` to
-  publish to HiveMQ; verify messages arriving in Snowflake under the new topic.
-- Wire + verify the two SDM120 power meters.
+- Wire + verify the two SDM120 power meters; re-add AC power card to HMI once data is live.
 - Add `NOPASSWD` sudoers entry for `arduino` user to allow remote service
   restarts (needed for MCU auto-recover and remote `systemctl restart`):
   `arduino ALL=(ALL) NOPASSWD: /bin/systemctl restart hvac-bridge, /bin/systemctl restart arduino-router`
 - Verify Snowflake pipeline is receiving `jchriswaters_merrick_ac` messages —
   HiveMQ publish confirmed working 2026-07-18; wait for next flush cycle or
   trigger a manual flush per `mqtt-to-snowflake/TROUBLESHOOTING.md`.
+- Room tablets: evaluate WiFi wall-mount tablets or MagSafe iPhone mounts as
+  per-room thermostat/display replacements.  Each room would need an ESP32 +
+  SHT31 sensor node publishing to local mosquitto.
