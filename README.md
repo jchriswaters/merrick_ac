@@ -22,7 +22,8 @@ hvac-controller/
 │   ├── component-list.md            ← full bill of materials with notes
 │   ├── control-logic.md             ← HVAC control rules (zone arbitration, interlocks)
 │   ├── mqtt-payload-spec.md         ← MQTT topic, field names, types, units
-│   └── deployment.md                ← MCU flash procedure + runtime setup
+│   ├── deployment.md                ← MCU flash procedure + runtime setup
+│   └── network-and-remote-access.md ← proposed dedicated Wi-Fi network + remote/iOS access design
 ├── mcu/
 │   └── hvac_controller/
 │       └── hvac_controller.ino      ← STM32 sketch — production-ready
@@ -54,6 +55,9 @@ hvac-controller/
 - The MQTT schema is in **`docs/mqtt-payload-spec.md`**.
 - The MCU flash procedure (with all the Uno Q gotchas) and the systemd-side runtime
   setup are in **`docs/deployment.md`** — read before flashing.
+- The proposed dedicated HVAC Wi-Fi network and the options for remote access from the
+  internet (including an iOS app) are in **`docs/network-and-remote-access.md`**. It is a
+  design proposal; nothing in it is implemented yet.
 - All sensors and power monitors share a single **RS485 Modbus RTU bus** read by the
   Linux side via a USB-RS485 adapter — the MCU handles digital I/O only (no sensor code).
 - The RS485 bus carries: 2× Eastron SDM120 energy meters + 2× SHT30 temp/humidity sensors.
